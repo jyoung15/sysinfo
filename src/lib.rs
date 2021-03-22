@@ -83,6 +83,12 @@ cfg_if::cfg_if! {
 
         #[cfg(test)]
         const MIN_USERS: usize = 1;
+    } else if #[cfg(target_os = "freebsd")] {
+        mod freebsd;
+        use freebsd as sys;
+
+        #[cfg(test)]
+        const MIN_USERS: usize = 1;
     } else if #[cfg(windows)] {
         mod windows;
         use windows as sys;
