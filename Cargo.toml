@@ -42,3 +42,6 @@ apple-app-store = []
 c-interface = []
 multithread = ["rayon"]
 debug = ["libc/extra_traits"]
+
+[build-dependencies]
+bindgen = "^0.57"

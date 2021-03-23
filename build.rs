@@ -1,3 +1,23 @@
+#[cfg(any(target_os = "freebsd"))]
+use bindgen;
+use std::env;
+use std::path::PathBuf;
+
+#[cfg(any(target_os = "freebsd"))]
+fn freebsd_bindgen() {
+    println!("cargo:rustc-link-lib=util");
+    println!("cargo:rerun-if-changed=freebsd_wrapper.h");
+    let bindings = bindgen::Builder::default()
+        .header("freebsd_wrapper.h")
+        .parse_callbacks(Box::new(bindgen::CargoCallbacks))
+        .generate()
+        .expect("Unable to generate bindings");
+    let out_path = PathBuf::from(env::var("OUT_DIR").unwrap());
+    bindings
+        .write_to_file(out_path.join("freebsd_bindings.rs"))
+        .expect("Couldn't write bindings!");
+}
+
 fn main() {
     let is_apple = std::env::var("TARGET")
         .map(|t| t.contains("-apple"))
@@ -17,4 +37,7 @@ fn main() {
         println!("cargo:rustc-link-lib=framework=Foundation");
         println!("cargo:rustc-link-lib=framework=CoreFoundation");
     }
+
+    #[cfg(any(target_os = "freebsd"))]
+    freebsd_bindgen();
 }

@@ -2,15 +2,22 @@
 // Sysinfo
 //
 
+#![allow(non_upper_case_globals)]
+#![allow(non_camel_case_types)]
+#![allow(non_snake_case)]
+#![allow(dead_code)]
+include!(concat!(env!("OUT_DIR"), "/freebsd_bindings.rs"));
+
 use crate::sys::component::{self, Component};
 use crate::sys::disk;
 use crate::sys::process::*;
 use crate::sys::processor::*;
 use crate::{Disk, LoadAvg, Networks, Pid, ProcessExt, RefreshKind, SystemExt, User};
 
-use libc::{self, c_char, gid_t, sysconf, uid_t, _SC_HOST_NAME_MAX, _SC_PAGESIZE};
+use libc::{self, c_char, sysconf, _SC_HOST_NAME_MAX, _SC_PAGESIZE};
 use std::cell::UnsafeCell;
 use std::collections::HashMap;
+use std::convert::TryInto;
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
@@ -18,7 +25,7 @@ use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
-use sysctl::CtlValue::{Node, Struct};
+use sysctl::CtlValue::Struct;
 use sysctl::Sysctl;
 
 use crate::utils::{into_iter, realpath};
@@ -687,19 +694,23 @@ fn update_time_and_memory(
     uptime: u64,
     now: u64,
 ) {
-    let pids = sysctl::Ctl::new("kern.proc.pid");
-    if let Ok(sysctl::Ctl { oid }) = pids {
-        // struct kinfo_proc defined in /usr/include/sys/user.h
-        // maybe consider calling "struct kinfo_proc *kinfo_getproc(pid_t pid);" in libutil
+    let kinfo_proc = unsafe { kinfo_getproc(pid) };
+    assert!(kinfo_proc != std::ptr::null_mut());
+    let ki_rssize = unsafe { (*kinfo_proc).ki_rssize };
+    let ki_size = unsafe { (*kinfo_proc).ki_size };
+    // TODO: Add user and system time (this isn't included in kinfo_proc)
+    // let user_time =
+    // let system_time =
+    entry.memory = ki_rssize.try_into().unwrap();
+    entry.virtual_memory = ki_size;
 
-        let kinfo_proc = sysctl::Ctl {
-            oid: vec![oid[0], oid[1], oid[2], pid],
-        }
-        .value();
-        if let Ok(Node(kinfo_proc)) = kinfo_proc {
-            println!("kinfo_proc for pid {} = {:?}", pid, kinfo_proc);
-        }
-    }
+    // TODO: kinfo_proc needs to be freed after use:
+    // On success the kinfo_getproc() function returns a pointer to a struct
+    // kinfo_proc structure as defined by <sys/user.h>.  The pointer was
+    // obtained by an internal call to malloc(3) and must be freed by the caller
+    // with a call to free(3).  On failure the kinfo_getproc() function returns
+    // NULL.
+    unsafe { libc::free(kinfo_proc as *mut libc::c_void) };
 
     // {
     //     // rss

@@ -2,6 +2,11 @@
 // Sysinfo
 //
 //
+#![allow(non_upper_case_globals)]
+#![allow(non_camel_case_types)]
+#![allow(non_snake_case)]
+#![allow(dead_code)]
+include!(concat!(env!("OUT_DIR"), "/freebsd_bindings.rs"));
 
 use crate::sys::system::get_all_data;
 use crate::{utils, DiskExt, DiskType};
@@ -212,8 +217,66 @@ fn get_all_disks_inner(content: &str) -> Vec<Disk> {
         .collect()
 }
 
+fn i8s_to_string(buf: &[i8]) -> String {
+    let u8s: Vec<u8> = buf.iter().map(|i| *i as u8).collect();
+    std::str::from_utf8(&u8s).unwrap().to_string()
+}
+
+impl Default for statfs {
+    fn default() -> Self {
+        Self {
+            f_version: 0,
+            f_type: 0,
+            f_flags: 0,
+            f_bsize: 0,
+            f_iosize: 0,
+            f_blocks: 0,
+            f_bfree: 0,
+            f_bavail: 0,
+            f_files: 0,
+            f_ffree: 0,
+            f_syncwrites: 0,
+            f_asyncwrites: 0,
+            f_syncreads: 0,
+            f_asyncreads: 0,
+            f_spare: [0; 10usize],
+            f_namemax: 0,
+            f_owner: 0,
+            f_fsid: fsid { val: [0; 2usize] },
+            f_charspare: [0; 80usize],
+            f_fstypename: [0; 16usize],
+            f_mntfromname: [0; 1024usize],
+            f_mntonname: [0; 1024usize],
+        }
+    }
+}
+
 pub fn get_all_disks() -> Vec<Disk> {
-    get_all_disks_inner(&get_all_data("/proc/mounts", 16_385).unwrap_or_default())
+    const MAX_MOUNTS: usize = 500; // if this is too high, we get a segfault
+    let mut buf: [statfs; MAX_MOUNTS] = [Default::default(); MAX_MOUNTS];
+    let mount_count = unsafe { getfsstat(std::ptr::null_mut(), 0, MNT_NOWAIT as i32) };
+    assert!(MAX_MOUNTS as i32 >= mount_count);
+    let mounts = unsafe {
+        getfsstat(
+            buf.as_mut_ptr(),
+            std::mem::size_of_val(&buf) as i64,
+            MNT_NOWAIT as i32,
+        )
+    };
+    assert_eq!(mount_count, mounts);
+    (0..mount_count as usize)
+        .map(|i| {
+            let disk = buf[i];
+            Disk {
+                type_: DiskType::HDD, // or SSD, Removable, Unknown(isize)
+                name: i8s_to_string(&disk.f_mntfromname).into(),
+                file_system: disk.f_fstypename.iter().map(|i| *i as u8).collect(),
+                mount_point: i8s_to_string(&disk.f_mntonname).into(),
+                total_space: disk.f_blocks,
+                available_space: disk.f_bfree,
+            }
+        })
+        .collect()
 }
 
 // #[test]
