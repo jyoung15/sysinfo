@@ -43,5 +43,5 @@ c-interface = []
 multithread = ["rayon"]
 debug = ["libc/extra_traits"]
 
-[build-dependencies]
+[target.'cfg(target_os = "freebsd")'.build-dependencies]
 bindgen = "^0.57"
