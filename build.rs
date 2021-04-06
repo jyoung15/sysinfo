@@ -1,11 +1,13 @@
 #[cfg(target_os = "freebsd")]
 use bindgen;
+#[cfg(target_os = "freebsd")]
 use std::env;
+#[cfg(target_os = "freebsd")]
 use std::path::PathBuf;
 
 #[cfg(target_os = "freebsd")]
 fn freebsd_bindgen() {
-    println!("cargo:rustc-link-lib=util");
+    println!("cargo:rustc-link-lib=procstat");
     println!("cargo:rerun-if-changed=freebsd_wrapper.h");
     let bindings = bindgen::Builder::default()
         .header("freebsd_wrapper.h")

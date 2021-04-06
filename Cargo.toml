@@ -30,7 +30,11 @@ libc = "^0.2.86"
 core-foundation-sys = "0.8"
 
 [target.'cfg(target_os = "freebsd")'.dependencies]
-sysctl = "~0.4"
+sysctl = { git = "https://github.com/jyoung15/sysctl-rs", branch = "issue-26-list-of-longs" }
+nix = "0.20.0"
+num = "^0.4"
+num-traits = "^0.2"
+num-derive = "^0.3"
 
 [lib]
 name = "sysinfo"

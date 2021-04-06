@@ -1,183 +1,219 @@
-//
-// Sysinfo
-//
-//
-
-use std::collections::HashMap;
-use std::fmt;
-use std::fs::File;
-use std::path::{Path, PathBuf};
-
-use libc::{c_int, gid_t, kill, uid_t};
+#![allow(non_upper_case_globals)]
+#![allow(non_camel_case_types)]
+#![allow(non_snake_case)]
+#![allow(dead_code)]
+include!(concat!(env!("OUT_DIR"), "/freebsd_bindings.rs"));
 
 use crate::{DiskUsage, Pid, ProcessExt, Signal};
+use num_derive::FromPrimitive;
+// use std::mem::MaybeUninit;
+use std::{
+    ffi::CStr,
+    path::{Path, PathBuf},
+};
 
+// see /usr/include/sys/proc.h and man ps(1)
 /// Enum describing the different status of a process.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, FromPrimitive)]
+#[repr(i8)]
 pub enum ProcessStatus {
-    /// Waiting in uninterruptible disk sleep.
-    Idle,
-    /// Running.
-    Run,
-    /// Sleeping in an interruptible waiting.
-    Sleep,
-    /// Stopped (on a signal) or (before Linux 2.6.33) trace stopped.
-    Stop,
-    /// Zombie.
-    Zombie,
-    /// Tracing stop (Linux 2.6.33 onward).
-    Tracing,
-    /// Dead.
-    Dead,
-    /// Wakekill (Linux 2.6.33 to 3.13 only).
-    Wakekill,
-    /// Waking (Linux 2.6.33 to 3.13 only).
-    Waking,
-    /// Parked (Linux 3.9 to 3.13 only).
-    Parked,
-    /// Unknown.
-    Unknown(u32),
+    /// Unknown Process Status
+    Unknown = 0,
+    /// Forking
+    Forking = 1,
+    /// Runnable
+    Runnable = 2,
+    /// Sleeping
+    Sleeping = 3,
+    /// Stopped
+    Stopped = 4,
+    /// Zombie
+    Zombie = 5,
+    /// Waiting on Interrupt
+    InterruptWait = 6,
+    /// Blocked on Lock
+    LockWait = 7,
 }
 
-impl From<u32> for ProcessStatus {
-    fn from(status: u32) -> ProcessStatus {
-        match status {
-            1 => ProcessStatus::Idle,
-            2 => ProcessStatus::Run,
-            3 => ProcessStatus::Sleep,
-            4 => ProcessStatus::Stop,
-            5 => ProcessStatus::Zombie,
-            x => ProcessStatus::Unknown(x),
-        }
+impl Default for ProcessStatus {
+    fn default() -> Self {
+        Self::Unknown
     }
 }
 
-impl From<char> for ProcessStatus {
-    fn from(status: char) -> ProcessStatus {
-        match status {
-            'R' => ProcessStatus::Run,
-            'S' => ProcessStatus::Sleep,
-            'D' => ProcessStatus::Idle,
-            'Z' => ProcessStatus::Zombie,
-            'T' => ProcessStatus::Stop,
-            't' => ProcessStatus::Tracing,
-            'X' | 'x' => ProcessStatus::Dead,
-            'K' => ProcessStatus::Wakekill,
-            'W' => ProcessStatus::Waking,
-            'P' => ProcessStatus::Parked,
-            x => ProcessStatus::Unknown(x as u32),
-        }
-    }
-}
-
-impl ProcessStatus {
-    /// Used to display `ProcessStatus`.
-    pub fn to_string(&self) -> &str {
-        match *self {
-            ProcessStatus::Idle => "Idle",
-            ProcessStatus::Run => "Runnable",
-            ProcessStatus::Sleep => "Sleeping",
-            ProcessStatus::Stop => "Stopped",
-            ProcessStatus::Zombie => "Zombie",
-            ProcessStatus::Tracing => "Tracing",
-            ProcessStatus::Dead => "Dead",
-            ProcessStatus::Wakekill => "Wakekill",
-            ProcessStatus::Waking => "Waking",
-            ProcessStatus::Parked => "Parked",
-            ProcessStatus::Unknown(_) => "Unknown",
-        }
-    }
-}
-
-impl fmt::Display for ProcessStatus {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}", self.to_string())
-    }
+/// Process File Info
+#[derive(Default, Clone)]
+pub struct ProcFiles {
+    root: PathBuf,
+    cwd: PathBuf,
 }
 
 /// Struct containing a process' information.
+#[derive(Default)]
 pub struct Process {
-    pub(crate) name: String,
-    pub(crate) cmd: Vec<String>,
-    pub(crate) exe: PathBuf,
-    pub(crate) pid: Pid,
-    parent: Option<Pid>,
-    pub(crate) environ: Vec<String>,
-    pub(crate) cwd: PathBuf,
-    pub(crate) root: PathBuf,
-    pub(crate) memory: u64,
-    pub(crate) virtual_memory: u64,
-    utime: u64,
-    stime: u64,
-    old_utime: u64,
-    old_stime: u64,
-    start_time: u64,
-    updated: bool,
-    cpu_usage: f32,
-    /// User id of the process owner.
-    pub uid: uid_t,
-    /// Group id of the process owner.
-    pub gid: gid_t,
-    pub(crate) status: ProcessStatus,
-    /// Tasks run by this process.
-    pub tasks: HashMap<Pid, Process>,
-    pub(crate) stat_file: Option<File>,
-    old_read_bytes: u64,
-    old_written_bytes: u64,
-    read_bytes: u64,
-    written_bytes: u64,
+    /// PID
+    pub pid: Pid,
+    /// Parent PID
+    pub ppid: Option<Pid>,
+    /// Start Time
+    pub start: u64,
+    /// Command Name
+    pub comm: String,
+    /// Virtual Memory
+    pub size: u64,
+    /// RSS Memory
+    pub rssize: u64,
+    /// Stack Size
+    pub ssize: u64,
+    /// Process Status
+    pub stat: ProcessStatus,
+    /// Environment Variables
+    pub env: Vec<String>,
+    /// Arguments
+    pub argv: Vec<String>,
+    /// Process File Info
+    pub files: ProcFiles,
+    /// Executable File
+    pub exe: String,
+    /// CPU Usage
+    pub cpu: f32,
+    /// Disk Usage
+    pub disk_usage: DiskUsage,
 }
 
-impl ProcessExt for Process {
-    fn new(pid: Pid, parent: Option<Pid>, start_time: u64) -> Process {
-        Process {
-            name: String::with_capacity(20),
-            pid,
-            parent,
-            cmd: Vec::with_capacity(2),
-            environ: Vec::with_capacity(10),
-            exe: PathBuf::new(),
-            cwd: PathBuf::new(),
-            root: PathBuf::new(),
-            memory: 0,
-            virtual_memory: 0,
-            cpu_usage: 0.,
-            utime: 0,
-            stime: 0,
-            old_utime: 0,
-            old_stime: 0,
-            updated: true,
-            start_time,
-            uid: 0,
-            gid: 0,
-            status: ProcessStatus::Unknown(0),
-            tasks: if pid == 0 {
-                HashMap::with_capacity(1000)
-            } else {
-                HashMap::new()
-            },
-            stat_file: None,
-            old_read_bytes: 0,
-            old_written_bytes: 0,
-            read_bytes: 0,
-            written_bytes: 0,
+// /usr/include/sys/vnode.h
+#[derive(Clone, Copy, Debug, FromPrimitive)]
+#[repr(i32)]
+pub enum vtype {
+    VNON,
+    VREG,
+    VDIR,
+    VBLK,
+    VCHR,
+    VLNK,
+    VSOCK,
+    VFIFO,
+    VBAD,
+    VMARKER,
+}
+
+impl Process {
+    /// Convert value returned from procstat_getenvv to HashMap
+    pub fn procstat_to_argv(raw: *mut *mut i8) -> Vec<String> {
+        if raw.is_null() {
+            Vec::new()
+        } else {
+            let mut env: Vec<String> = Vec::new();
+            let mut offset = 0;
+            loop {
+                let ptr = unsafe { raw.offset(offset) };
+                if unsafe { (*ptr).is_null() } {
+                    break;
+                }
+                let c_str = unsafe { CStr::from_ptr(*ptr) };
+                if let Ok(envvar) = c_str.to_str() {
+                    env.push(envvar.to_string());
+                    offset += 1;
+                } else {
+                    break;
+                }
+            }
+            env
         }
     }
 
-    fn kill(&self, signal: Signal) -> bool {
-        unsafe { kill(self.pid, signal as c_int) == 0 }
+    /// Convert result from procstat_getfiles to ProcFiles
+    pub fn procstat_files(
+        // pstat: *mut crate::freebsd::system::procstat,
+        files: *mut crate::freebsd::system::filestat_list,
+    ) -> ProcFiles {
+        let mut procfile = ProcFiles::default();
+        let mut np = unsafe { *files }.stqh_first;
+        loop {
+            if np.is_null() {
+                break;
+            }
+            // println!("fd: {:?}", unsafe { *np }.fs_fd);
+            let flags = unsafe { *np }.fs_uflags as u32;
+
+            /*
+            let mut vn = MaybeUninit::<vnstat>::zeroed();
+
+            // need to cast these due to conflict between freebsd::process and freebsd::system bindings
+            let nps = np as *mut crate::freebsd::process::filestat;
+            let pstats = pstat as *mut crate::freebsd::process::procstat;
+            if unsafe {
+                procstat_get_vnode_info(pstats, nps, vn.as_mut_ptr(), std::ptr::null_mut())
+            } == 0
+            {
+                let vn_init = unsafe { vn.assume_init() };
+                println!("vn_init.vn_fileid={:?}", vn_init.vn_fileid);
+                println!("vn_init.vn_fsid={:?}", vn_init.vn_fsid);
+                println!("vn_init.vn_mode={:?}", vn_init.vn_mode);
+                if !vn_init.vn_mntdir.is_null() {
+                    println!("vn_init.vn_mntdir={:?}", unsafe {
+                        CStr::from_ptr(vn_init.vn_mntdir)
+                    });
+                }
+                let vn_type: Option<vtype> = num::FromPrimitive::from_i32(vn_init.vn_type);
+                println!("vn_init.vn_type={:?}", vn_type);
+            }
+             */
+            if flags & PS_FST_UFLAG_RDIR == PS_FST_UFLAG_RDIR {
+                procfile.root = Path::new(
+                    unsafe { CStr::from_ptr((*np).fs_path) }
+                        .to_str()
+                        .unwrap_or(""),
+                )
+                .to_path_buf();
+            }
+            if flags & PS_FST_UFLAG_CDIR == PS_FST_UFLAG_CDIR {
+                procfile.cwd = Path::new(
+                    unsafe { CStr::from_ptr((*np).fs_path) }
+                        .to_str()
+                        .unwrap_or(""),
+                )
+                .to_path_buf();
+            }
+            /*
+            if flags & PS_FST_UFLAG_TEXT == PS_FST_UFLAG_TEXT {
+                println!("text");
+            }
+            if flags & PS_FST_UFLAG_CTTY == PS_FST_UFLAG_CTTY {
+                println!("tty");
+            }
+            */
+            np = unsafe { *np }.next.stqe_next;
+        }
+
+        procfile
+    }
+}
+
+impl ProcessExt for Process {
+    fn new(pid: Pid, ppid: Option<Pid>, start: u64) -> Self {
+        Self {
+            pid,
+            ppid,
+            start,
+            ..Self::default()
+        }
+    }
+
+    fn kill(&self, _signal: Signal) -> bool {
+        unimplemented!()
     }
 
     fn name(&self) -> &str {
-        &self.name
+        &self.comm
     }
 
     fn cmd(&self) -> &[String] {
-        &self.cmd
+        &self.argv
     }
 
-    fn exe(&self) -> &Path {
-        self.exe.as_path()
+    fn exe(&self) -> &std::path::Path {
+        Path::new(&self.exe)
     }
 
     fn pid(&self) -> Pid {
@@ -185,112 +221,42 @@ impl ProcessExt for Process {
     }
 
     fn environ(&self) -> &[String] {
-        &self.environ
+        &self.env
     }
 
-    fn cwd(&self) -> &Path {
-        self.cwd.as_path()
+    fn cwd(&self) -> &std::path::Path {
+        Path::new(&self.files.cwd)
     }
 
-    fn root(&self) -> &Path {
-        self.root.as_path()
+    fn root(&self) -> &std::path::Path {
+        Path::new(&self.files.root)
     }
 
     fn memory(&self) -> u64 {
-        self.memory
+        self.rssize
     }
 
     fn virtual_memory(&self) -> u64 {
-        self.virtual_memory
+        self.size
     }
 
     fn parent(&self) -> Option<Pid> {
-        self.parent
+        self.ppid
     }
 
-    /// Returns the status of the processus (idle, run, zombie, etc). `None` means that
-    /// `sysinfo` doesn't have enough rights to get this information.
     fn status(&self) -> ProcessStatus {
-        self.status
+        self.stat
     }
 
     fn start_time(&self) -> u64 {
-        self.start_time
+        self.start
     }
 
     fn cpu_usage(&self) -> f32 {
-        self.cpu_usage
+        self.cpu
     }
 
     fn disk_usage(&self) -> DiskUsage {
-        DiskUsage {
-            written_bytes: self.written_bytes - self.old_written_bytes,
-            total_written_bytes: self.written_bytes,
-            read_bytes: self.read_bytes - self.old_read_bytes,
-            total_read_bytes: self.read_bytes,
-        }
-    }
-}
-
-impl Drop for Process {
-    fn drop(&mut self) {
-        if self.stat_file.is_some() {
-            if let Ok(ref mut x) = unsafe { crate::sys::system::REMAINING_FILES.lock() } {
-                **x += 1;
-            }
-        }
-    }
-}
-
-pub fn compute_cpu_usage(p: &mut Process, nb_processors: u64, total_time: f32) {
-    p.cpu_usage =
-        ((p.utime - p.old_utime + p.stime - p.old_stime) * nb_processors * 100) as f32 / total_time;
-    p.updated = false;
-}
-
-pub fn set_time(p: &mut Process, utime: u64, stime: u64) {
-    p.old_utime = p.utime;
-    p.old_stime = p.stime;
-    p.utime = utime;
-    p.stime = stime;
-    p.updated = true;
-}
-
-pub fn has_been_updated(p: &Process) -> bool {
-    p.updated
-}
-
-pub(crate) fn update_process_disk_activity(p: &mut Process, path: &Path) {
-    let mut path = PathBuf::from(path);
-    path.push("io");
-    let data = match super::system::get_all_data(&path, 16_384) {
-        Ok(d) => d,
-        Err(_) => return,
-    };
-    let mut done = 0;
-    for line in data.split('\n') {
-        let mut parts = line.split(": ");
-        match parts.next() {
-            Some("read_bytes") => {
-                p.old_read_bytes = p.read_bytes;
-                p.read_bytes = parts
-                    .next()
-                    .and_then(|x| x.parse::<u64>().ok())
-                    .unwrap_or(p.old_read_bytes);
-            }
-            Some("write_bytes") => {
-                p.old_written_bytes = p.written_bytes;
-                p.written_bytes = parts
-                    .next()
-                    .and_then(|x| x.parse::<u64>().ok())
-                    .unwrap_or(p.old_written_bytes);
-            }
-            _ => continue,
-        }
-        done += 1;
-        if done > 1 {
-            // No need to continue the reading.
-            break;
-        }
+        self.disk_usage
     }
 }

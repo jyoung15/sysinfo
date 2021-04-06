@@ -1,6 +1,8 @@
-#include <sys/types.h>
-#include <sys/user.h>
-#include <libutil.h>
+#include <grp.h>
+#include <pwd.h>
 #include <sys/param.h>
-#include <sys/ucred.h>
-#include <sys/mount.h>
+#include <sys/sysctl.h>
+#include <sys/user.h>
+#include <net/if.h>
+#include <net/if_mib.h>
+#include <libprocstat.h>

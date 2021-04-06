@@ -1,332 +1,280 @@
-//
-// Sysinfo
-//
-//
-
-#![allow(clippy::too_many_arguments)]
-
-use std::collections::HashSet;
-use std::fs::File;
-use std::io::Read;
-
+use crate::freebsd::sysctl_helpers::SysctlInner;
 use crate::ProcessorExt;
+use std::ops::Add;
+use std::ops::DivAssign;
+use sysctl::{Ctl, CtlValue, Sysctl};
 
-/// Struct containing values to compute a CPU usage.
-#[derive(Clone, Copy)]
-pub struct CpuValues {
-    user: u64,
-    nice: u64,
-    system: u64,
-    idle: u64,
-    iowait: u64,
-    irq: u64,
-    softirq: u64,
-    steal: u64,
-    _guest: u64,
-    _guest_nice: u64,
+#[derive(Default, Clone, Debug, Copy, PartialEq)]
+pub struct CpuTime {
+    user_time: i64,
+    nice_time: i64,
+    system_time: i64,
+    interrupt_time: i64,
+    idle_time: i64,
 }
 
-impl CpuValues {
-    /// Creates a new instance of `CpuValues` with everything set to `0`.
-    pub fn new() -> CpuValues {
-        CpuValues {
-            user: 0,
-            nice: 0,
-            system: 0,
-            idle: 0,
-            iowait: 0,
-            irq: 0,
-            softirq: 0,
-            steal: 0,
-            _guest: 0,
-            _guest_nice: 0,
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+pub struct CpuPct {
+    user_pct: f32,
+    nice_pct: f32,
+    system_pct: f32,
+    interrupt_pct: f32,
+    idle_pct: f32,
+}
+
+impl Add for CpuPct {
+    type Output = Self;
+    fn add(self, other: Self) -> Self {
+        Self {
+            user_pct: self.user_pct + other.user_pct,
+            nice_pct: self.nice_pct + other.nice_pct,
+            system_pct: self.system_pct + other.system_pct,
+            interrupt_pct: self.interrupt_pct + other.interrupt_pct,
+            idle_pct: self.idle_pct + other.idle_pct,
         }
-    }
-
-    /// Creates a new instance of `CpuValues` with everything set to the corresponding argument.
-    pub fn new_with_values(
-        user: u64,
-        nice: u64,
-        system: u64,
-        idle: u64,
-        iowait: u64,
-        irq: u64,
-        softirq: u64,
-        steal: u64,
-        guest: u64,
-        guest_nice: u64,
-    ) -> CpuValues {
-        CpuValues {
-            user,
-            nice,
-            system,
-            idle,
-            iowait,
-            irq,
-            softirq,
-            steal,
-            _guest: guest,
-            _guest_nice: guest_nice,
-        }
-    }
-
-    /*pub fn is_zero(&self) -> bool {
-        self.user == 0 && self.nice == 0 && self.system == 0 && self.idle == 0 &&
-        self.iowait == 0 && self.irq == 0 && self.softirq == 0 && self.steal == 0 &&
-        self.guest == 0 && self.guest_nice == 0
-    }*/
-
-    /// Sets the given argument to the corresponding fields.
-    pub fn set(
-        &mut self,
-        user: u64,
-        nice: u64,
-        system: u64,
-        idle: u64,
-        iowait: u64,
-        irq: u64,
-        softirq: u64,
-        steal: u64,
-        guest: u64,
-        guest_nice: u64,
-    ) {
-        self.user = user;
-        self.nice = nice;
-        self.system = system;
-        self.idle = idle;
-        self.iowait = iowait;
-        self.irq = irq;
-        self.softirq = softirq;
-        self.steal = steal;
-        self._guest = guest;
-        self._guest_nice = guest_nice;
-    }
-
-    /// Returns work time.
-    pub fn work_time(&self) -> u64 {
-        self.user + self.nice + self.system + self.irq + self.softirq + self.steal
-    }
-
-    /// Returns total time.
-    pub fn total_time(&self) -> u64 {
-        // `guest` is already included in `user`
-        // `guest_nice` is already included in `nice`
-        self.work_time() + self.idle + self.iowait
     }
 }
 
-/// Struct containing a processor information.
+impl DivAssign<u8> for CpuPct {
+    fn div_assign(&mut self, rhs: u8) {
+        let rhs = rhs as f32;
+        self.user_pct /= rhs;
+        self.nice_pct /= rhs;
+        self.system_pct /= rhs;
+        self.interrupt_pct /= rhs;
+        self.idle_pct /= rhs;
+    }
+}
+
+impl CpuPct {
+    fn non_idle_pct(&self) -> f32 {
+        self.user_pct + self.nice_pct + self.system_pct + self.interrupt_pct
+    }
+}
+
+impl CpuTime {
+    pub fn pct_diff(&self, previous: &Self) -> Option<CpuPct> {
+        let user_diff = (self.user_time - previous.user_time) as f32;
+        let nice_diff = (self.nice_time - previous.nice_time) as f32;
+        let system_diff = (self.system_time - previous.system_time) as f32;
+        let interrupt_diff = (self.interrupt_time - previous.interrupt_time) as f32;
+        let idle_diff = (self.idle_time - previous.idle_time) as f32;
+        let total = user_diff + nice_diff + system_diff + interrupt_diff + idle_diff;
+        if total > 0.0 {
+            Some(CpuPct {
+                user_pct: 100.0 * user_diff / total,
+                nice_pct: 100.0 * nice_diff / total,
+                system_pct: 100.0 * system_diff / total,
+                interrupt_pct: 100.0 * interrupt_diff / total,
+                idle_pct: 100.0 * idle_diff / total,
+            })
+        } else {
+            None
+        }
+    }
+}
+
+#[derive(Default, Clone)]
+pub struct ProcCommon {
+    frequency: u64,
+    vendor_id: String,
+    brand: String,
+}
+
+/// A set of Processors
+#[derive(Default, Clone)]
+pub struct ProcessorSet {
+    num_cpus: u8,
+    cpus: Vec<Processor>,
+    common: ProcCommon,
+    global: Processor,
+}
+
+/// Individual processor/core information.
+#[derive(Default, Clone)]
 pub struct Processor {
-    old_values: CpuValues,
-    new_values: CpuValues,
-    pub(crate) name: String,
-    cpu_usage: f32,
-    total_time: u64,
-    old_total_time: u64,
-    pub(crate) frequency: u64,
-    pub(crate) vendor_id: String,
-    pub(crate) brand: String,
+    cpu_id: String,
+    cp_time: CpuTime,
+    last_cp_time: CpuTime,
+    cpu_pct: CpuPct,
+    common: ProcCommon,
+}
+
+impl ProcessorSet {
+    pub fn get_cpus(&self) -> &Vec<Processor> {
+        &self.cpus
+    }
+
+    /// Make a new ProcessorSet
+    pub fn new() -> Self {
+        let mut proc = Self {
+            num_cpus: 0,
+            cpus: Vec::new(),
+            common: ProcCommon::default(),
+            global: Processor::default(),
+        };
+        proc.refresh_all();
+        proc.global = Processor {
+            cpu_id: "global".to_string(),
+            common: proc.common.clone(),
+            ..Processor::default()
+        };
+        proc
+    }
+
+    pub fn get_global_processor(&self) -> &Processor {
+        &self.global
+    }
+
+    /// Refresh Processor Details
+    pub fn refresh_all(&mut self) {
+        self.refresh_num_cpus();
+        self.refresh_vendor_id();
+        self.refresh_brand();
+        self.refresh_frequency();
+        self.refresh_cp_times();
+        for cpu in &mut self.cpus {
+            cpu.refresh_all(self.common.clone());
+        }
+        self.global.cpu_pct = self
+            .cpus
+            .iter()
+            .fold(CpuPct::default(), |acc, elem| acc + elem.cpu_pct);
+        self.global.cpu_pct /= self.num_cpus;
+    }
+
+    fn refresh_cp_times(&mut self) {
+        if let Ok(oid) = Ctl::new("kern.cp_times") {
+            if let Ok(CtlValue::List(cp_times)) = oid.value() {
+                let time_values: Option<Vec<i64>> = cp_times
+                    .into_iter()
+                    .map(|c| {
+                        if let CtlValue::Long(val) = c {
+                            Some(val)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                if let Some(time_values) = time_values {
+                    time_values
+                        .as_slice()
+                        .chunks_exact(5)
+                        .map(|c| CpuTime {
+                            user_time: c[0],
+                            nice_time: c[1],
+                            system_time: c[2],
+                            interrupt_time: c[3],
+                            idle_time: c[4],
+                        })
+                        .enumerate()
+                        .for_each(|(cpu_id, cp_time)| {
+                            self.cpus[cpu_id].update_cp_time(cp_time);
+                        })
+                }
+            }
+        } else {
+            sysinfo_debug!("could not determine CPU times");
+        }
+    }
+
+    fn refresh_vendor_id(&mut self) {
+        if let Some(hw_model) = Ctl::new("hw.machine").string_value() {
+            self.common.vendor_id = hw_model;
+        } else {
+            sysinfo_debug!("could not get hw.machine");
+        }
+    }
+
+    fn refresh_brand(&mut self) {
+        if let Some(brand) = Ctl::new("hw.model").string_value() {
+            self.common.brand = brand;
+        } else {
+            sysinfo_debug!("could not get hw.model");
+        }
+    }
+
+    pub fn refresh_num_cpus(&mut self) {
+        if let Some(hw_ncpu) = Ctl::new("hw.ncpu").int_value() {
+            self.num_cpus = hw_ncpu as u8;
+            if self.num_cpus != self.cpus.len() as u8 {
+                self.cpus
+                    .resize(hw_ncpu as usize, Processor::new(self.common.clone()));
+                for cpu_id in 0..hw_ncpu {
+                    self.cpus[cpu_id as usize].set_cpu_id(format!("cpu{}", cpu_id));
+                }
+            }
+        } else {
+            sysinfo_debug!("could not determine number of CPUs");
+        }
+    }
+
+    fn refresh_frequency(&mut self) {
+        if let Some(freq) = Ctl::new("dev.cpu.0.freq").int_value() {
+            self.common.frequency = freq as u64;
+        } else {
+            sysinfo_debug!("could not determine CPU frequency");
+        }
+    }
 }
 
 impl Processor {
-    pub(crate) fn new_with_values(
-        name: &str,
-        user: u64,
-        nice: u64,
-        system: u64,
-        idle: u64,
-        iowait: u64,
-        irq: u64,
-        softirq: u64,
-        steal: u64,
-        guest: u64,
-        guest_nice: u64,
-        frequency: u64,
-        vendor_id: String,
-        brand: String,
-    ) -> Processor {
-        Processor {
-            name: name.to_owned(),
-            old_values: CpuValues::new(),
-            new_values: CpuValues::new_with_values(
-                user, nice, system, idle, iowait, irq, softirq, steal, guest, guest_nice,
-            ),
-            cpu_usage: 0f32,
-            total_time: 0,
-            old_total_time: 0,
-            frequency,
-            vendor_id,
-            brand,
+    /// Make a new Processor
+    pub fn new(common: ProcCommon) -> Self {
+        let mut proc = Self {
+            cpu_id: "cpu0".to_string(),
+            cp_time: CpuTime::default(),
+            last_cp_time: CpuTime::default(),
+            cpu_pct: CpuPct::default(),
+            common: common.clone(),
+        };
+        proc.refresh_all(common);
+        proc
+    }
+
+    /// Refresh Processor Details
+    pub fn refresh_all(&mut self, common: ProcCommon) {
+        self.common = common;
+        self.refresh_and_get_cpu_usages()
+    }
+
+    /// Update CPU times
+    pub fn update_cp_time(&mut self, cp_time: CpuTime) {
+        // println!("update_cp_time for {}: {:?}", self.cpu_id, cp_time);
+        self.last_cp_time = self.cp_time.clone();
+        self.cp_time = cp_time;
+    }
+
+    fn refresh_and_get_cpu_usages(&mut self) {
+        if let Some(pct_diff) = self.cp_time.pct_diff(&self.last_cp_time) {
+            self.cpu_pct = pct_diff;
         }
     }
 
-    pub(crate) fn set(
-        &mut self,
-        user: u64,
-        nice: u64,
-        system: u64,
-        idle: u64,
-        iowait: u64,
-        irq: u64,
-        softirq: u64,
-        steal: u64,
-        guest: u64,
-        guest_nice: u64,
-    ) {
-        macro_rules! min {
-            ($a:expr, $b:expr) => {
-                if $a > $b {
-                    ($a - $b) as f32
-                } else {
-                    1.
-                }
-            };
-        }
-        self.old_values = self.new_values;
-        self.new_values.set(
-            user, nice, system, idle, iowait, irq, softirq, steal, guest, guest_nice,
-        );
-        self.total_time = self.new_values.total_time();
-        self.old_total_time = self.old_values.total_time();
-        self.cpu_usage = min!(self.new_values.work_time(), self.old_values.work_time())
-            / min!(self.total_time, self.old_total_time)
-            * 100.;
-        if self.cpu_usage > 100. {
-            self.cpu_usage = 100.; // to prevent the pourcentage to go above 100%
-        }
+    /// Set the CPU ID
+    pub fn set_cpu_id(&mut self, cpu_id: String) {
+        self.cpu_id = cpu_id;
     }
 }
 
 impl ProcessorExt for Processor {
     fn get_cpu_usage(&self) -> f32 {
-        self.cpu_usage
+        self.cpu_pct.non_idle_pct()
     }
 
     fn get_name(&self) -> &str {
-        &self.name
-    }
-
-    /// Returns the CPU frequency in MHz.
-    fn get_frequency(&self) -> u64 {
-        self.frequency
+        &self.cpu_id
     }
 
     fn get_vendor_id(&self) -> &str {
-        &self.vendor_id
+        &self.common.vendor_id
     }
 
     fn get_brand(&self) -> &str {
-        &self.brand
-    }
-}
-
-pub fn get_raw_times(p: &Processor) -> (u64, u64) {
-    (p.total_time, p.old_total_time)
-}
-
-pub fn get_cpu_frequency(cpu_core_index: usize) -> u64 {
-    let mut s = String::new();
-    if File::open(format!(
-        "/sys/devices/system/cpu/cpu{}/cpufreq/scaling_cur_freq",
-        cpu_core_index
-    ))
-    .and_then(|mut f| f.read_to_string(&mut s))
-    .is_ok()
-    {
-        let freq_option = s.trim().split('\n').next();
-        if let Some(freq_string) = freq_option {
-            if let Ok(freq) = freq_string.parse::<u64>() {
-                return freq / 1000;
-            }
-        }
-    }
-    s.clear();
-    if File::open("/proc/cpuinfo")
-        .and_then(|mut f| f.read_to_string(&mut s))
-        .is_err()
-    {
-        return 0;
-    }
-    let find_cpu_mhz = s.split('\n').find(|line| {
-        line.starts_with("cpu MHz\t")
-            || line.starts_with("BogoMIPS")
-            || line.starts_with("clock\t")
-            || line.starts_with("bogomips per cpu")
-    });
-    find_cpu_mhz
-        .and_then(|line| line.split(':').last())
-        .and_then(|val| val.replace("MHz", "").trim().parse::<f64>().ok())
-        .map(|speed| speed as u64)
-        .unwrap_or_default()
-}
-
-pub fn get_physical_core_count() -> Option<usize> {
-    let mut s = String::new();
-    if File::open("/proc/cpuinfo")
-        .and_then(|mut f| f.read_to_string(&mut s))
-        .is_err()
-    {
-        return None;
+        &self.common.brand
     }
 
-    let mut core_ids_and_physical_ids: HashSet<String> = HashSet::new();
-    let mut core_id = "";
-    let mut physical_id = "";
-    for line in s.lines() {
-        if line.starts_with("core id") {
-            core_id = line
-                .splitn(2, ':')
-                .last()
-                .map(|x| x.trim())
-                .unwrap_or_default();
-        } else if line.starts_with("physical id") {
-            physical_id = line
-                .splitn(2, ':')
-                .last()
-                .map(|x| x.trim())
-                .unwrap_or_default();
-        }
-        if !core_id.is_empty() && !physical_id.is_empty() {
-            core_ids_and_physical_ids.insert(format!("{} {}", core_id, physical_id));
-            core_id = "";
-            physical_id = "";
-        }
+    fn get_frequency(&self) -> u64 {
+        self.common.frequency
     }
-
-    Some(core_ids_and_physical_ids.len())
-}
-
-/// Returns the brand/vendor string for the first CPU (which should be the same for all CPUs).
-pub fn get_vendor_id_and_brand() -> (String, String) {
-    let mut s = String::new();
-    if File::open("/proc/cpuinfo")
-        .and_then(|mut f| f.read_to_string(&mut s))
-        .is_err()
-    {
-        return (String::new(), String::new());
-    }
-
-    fn get_value(s: &str) -> String {
-        s.split(':')
-            .last()
-            .map(|x| x.trim().to_owned())
-            .unwrap_or_default()
-    }
-
-    let mut vendor_id = None;
-    let mut brand = None;
-
-    for it in s.split('\n') {
-        if it.starts_with("vendor_id\t") {
-            vendor_id = Some(get_value(it));
-        } else if it.starts_with("model name\t") {
-            brand = Some(get_value(it));
-        } else {
-            continue;
-        }
-        if brand.is_some() && vendor_id.is_some() {
-            break;
-        }
-    }
-    (vendor_id.unwrap_or_default(), brand.unwrap_or_default())
 }

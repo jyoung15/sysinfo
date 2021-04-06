@@ -228,6 +228,9 @@ mod test {
                     assert_eq!(*user.get_uid(), 0);
                     assert_eq!(*user.get_gid(), 0);
                 }
+                // "toor" account on FreeBSD has UID/GID 0 by default
+                #[cfg(target_os = "freebsd")]
+                "toor" => {}
                 _ => {
                     assert!(*user.get_uid() > 0);
                     #[cfg(not(target_os = "windows"))]
