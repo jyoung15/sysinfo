@@ -152,8 +152,10 @@ impl NetworksExt for Networks {
                         val.ifaddrs.push(ifaddr);
                         val.refresh_counters();
                     } else {
-                        let mut nd = NetworkData::default();
-                        nd.ifaddrs = vec![ifaddr];
+                        let mut nd = NetworkData {
+                            ifaddrs: vec![ifaddr],
+                            ..NetworkData::default()
+                        };
                         nd.refresh_counters();
                         self.interfaces.insert(if_name, nd);
                     }

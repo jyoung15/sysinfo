@@ -8,7 +8,6 @@
 #![allow(dead_code)]
 include!(concat!(env!("OUT_DIR"), "/freebsd_bindings.rs"));
 
-use num;
 use std::{collections::HashMap, ffi::CStr, time::SystemTime};
 
 use crate::{
@@ -75,37 +74,34 @@ impl System {
         const BT: usize = 8;
         const KERN_BOOTTIME_LENGTH: usize = 16;
         const KERN_BOOTTIME_SECONDS_LENGTH: usize = 8;
-        match Ctl::new("kern.boottime").and_then(|c| c.value()) {
-            Ok(Struct(boottime_vec)) => {
-                /*
-                Raw sysctl value is a 16 byte value. The first 8 bytes are
-                the boot time in seconds (little-endian).  The last 8
-                bytes are the microseconds (not needed in this case).
+        if let Ok(Struct(boottime_vec)) = Ctl::new("kern.boottime").and_then(|c| c.value()) {
+            /*
+            Raw sysctl value is a 16 byte value. The first 8 bytes are
+            the boot time in seconds (little-endian).  The last 8
+            bytes are the microseconds (not needed in this case).
 
-                sysctl kern.boottime
-                kern.boottime: { sec = 1615733793, usec = 424240 } Sun Mar 14 10:56:33 2021
+            sysctl kern.boottime
+            kern.boottime: { sec = 1615733793, usec = 424240 } Sun Mar 14 10:56:33 2021
 
-                sysctl -b kern.boottime | od -i
-                0000000        1615733793               0          424240               0
+            sysctl -b kern.boottime | od -i
+            0000000        1615733793               0          424240               0
 
-                sysctl -b kern.boottime | od -t d1
-                0000000    33  36  78  96   0   0   0   0  48 121   6   0   0   0   0   0
-                 */
+            sysctl -b kern.boottime | od -t d1
+            0000000    33  36  78  96   0   0   0   0  48 121   6   0   0   0   0   0
+             */
 
-                if boottime_vec.len() == KERN_BOOTTIME_LENGTH {
-                    boottime_vec[..KERN_BOOTTIME_SECONDS_LENGTH]
-                        .iter()
-                        .enumerate()
-                        .fold(0_u64, |acc, (i, b)| acc + ((*b as u64) << (BT * i)))
-                } else {
-                    sysinfo_debug!("kern.boottime failed: boot time cannot be retrieve...");
-                    0
-                }
-            }
-            _ => {
+            if boottime_vec.len() == KERN_BOOTTIME_LENGTH {
+                boottime_vec[..KERN_BOOTTIME_SECONDS_LENGTH]
+                    .iter()
+                    .enumerate()
+                    .fold(0_u64, |acc, (i, b)| acc + ((*b as u64) << (BT * i)))
+            } else {
                 sysinfo_debug!("kern.boottime failed: boot time cannot be retrieve...");
                 0
             }
+        } else {
+            sysinfo_debug!("kern.boottime failed: boot time cannot be retrieve...");
+            0
         }
     }
 
@@ -166,7 +162,7 @@ impl System {
         self.groups.get(&gid).map(|g| g.name.clone())
     }
 
-    fn supplemental_groups_for_user(&self, name: String) -> Vec<String> {
+    fn supplemental_groups_for_user(&self, name: &str) -> Vec<String> {
         self.groups
             .values()
             .filter_map(|g| {
@@ -214,11 +210,11 @@ impl SystemExt for System {
         if refreshes.cpu() {
             ret.refresh_cpu();
         }
-        if refreshes.components() {
-            ret.refresh_components();
-        }
         if refreshes.components_list() {
             ret.refresh_components_list();
+        }
+        if refreshes.components() {
+            ret.refresh_components();
         }
         if refreshes.users_list() {
             ret.refresh_users_list();
@@ -231,6 +227,7 @@ impl SystemExt for System {
         self.boot_time = Self::boot_time();
         self.refresh_memory();
         self.refresh_cpu();
+        self.refresh_components_list();
         self.refresh_components();
     }
 
@@ -311,12 +308,16 @@ impl SystemExt for System {
     }
 
     fn refresh_cpu(&mut self) {
-        &self.processors.refresh_all();
+        self.processors.refresh_all();
     }
 
-    fn refresh_components_list(&mut self) {}
+    fn refresh_components_list(&mut self) {
+        self.components.clear();
+        self.components.push(Component::default());
+    }
 
     fn refresh_processes(&mut self) {
+        const MAX_PATHNAME_LEN: usize = 512;
         let pstat = unsafe { procstat_open_sysctl() };
         let mut pcount: u32 = 0;
         let kinfo = unsafe { procstat_getprocs(pstat, KERN_PROC_PROC as i32, 0, &mut pcount) };
@@ -333,12 +334,11 @@ impl SystemExt for System {
             let rusage = unsafe { (*kinfo.offset(o)).ki_rusage };
             let pctcpu = unsafe { (*kinfo.offset(o)).ki_pctcpu };
             let env =
-                Process::procstat_to_argv(unsafe { procstat_getenvv(pstat, kinfo.offset(o), 0) });
+                unsafe { Process::procstat_to_argv(procstat_getenvv(pstat, kinfo.offset(o), 0)) };
             let argv =
-                Process::procstat_to_argv(unsafe { procstat_getargv(pstat, kinfo.offset(o), 0) });
+                unsafe { Process::procstat_to_argv(procstat_getargv(pstat, kinfo.offset(o), 0)) };
             let pstat_files = unsafe { procstat_getfiles(pstat, kinfo.offset(o), 0) };
-            let files = Process::procstat_files(pstat_files);
-            const MAX_PATHNAME_LEN: usize = 512;
+            let files = unsafe { Process::procstat_files(pstat_files) };
             let mut pathname = [0_i8; MAX_PATHNAME_LEN];
             if unsafe {
                 procstat_getpathname(
@@ -401,16 +401,13 @@ impl SystemExt for System {
             let size = unsafe { (*kinfo).ki_size } as u64;
             let ssize = unsafe { (*kinfo).ki_ssize } as u64;
             let rssize = unsafe { (*kinfo).ki_rssize } as u64;
-            if let Some(proc) = self.pids.get_mut(&pid) {
+            self.pids.get_mut(&pid).map_or(false, |proc| {
                 (*proc).ppid = Some(ppid);
                 (*proc).size = size;
                 (*proc).ssize = ssize;
                 (*proc).rssize = rssize;
-                // TODO: update other items
                 true
-            } else {
-                false
-            }
+            })
         } else {
             false
         };
@@ -433,7 +430,7 @@ impl SystemExt for System {
             let name = unsafe { CStr::from_ptr(pw_val.pw_name) }
                 .to_string_lossy()
                 .into_owned();
-            let mut groups = self.supplemental_groups_for_user(name.clone());
+            let mut groups = self.supplemental_groups_for_user(&name);
             if let Some(grp) = self.group_name(pw_val.pw_gid) {
                 groups.push(grp);
             }
@@ -500,7 +497,7 @@ impl SystemExt for System {
     }
 
     fn get_components(&self) -> &[Component] {
-        todo!()
+        &self.components
     }
 
     fn get_components_mut(&mut self) -> &mut [Component] {

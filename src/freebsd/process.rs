@@ -98,19 +98,21 @@ pub enum vtype {
 }
 
 impl Process {
-    /// Convert value returned from procstat_getenvv to HashMap
-    pub fn procstat_to_argv(raw: *mut *mut i8) -> Vec<String> {
+    /// # Safety
+    /// Convert value returned from `procstat_getenvv` to `HashMap`
+    /// Takes a **char pointer
+    pub unsafe fn procstat_to_argv(raw: *mut *mut i8) -> Vec<String> {
         if raw.is_null() {
             Vec::new()
         } else {
             let mut env: Vec<String> = Vec::new();
             let mut offset = 0;
             loop {
-                let ptr = unsafe { raw.offset(offset) };
-                if unsafe { (*ptr).is_null() } {
+                let ptr = raw.offset(offset);
+                if (*ptr).is_null() {
                     break;
                 }
-                let c_str = unsafe { CStr::from_ptr(*ptr) };
+                let c_str = CStr::from_ptr(*ptr);
                 if let Ok(envvar) = c_str.to_str() {
                     env.push(envvar.to_string());
                     offset += 1;
@@ -122,19 +124,21 @@ impl Process {
         }
     }
 
-    /// Convert result from procstat_getfiles to ProcFiles
-    pub fn procstat_files(
+    /// # Safety
+    /// Convert result from `procstat_getfiles` to `ProcFiles`
+    /// Takes a `filestat_list` pointer
+    pub unsafe fn procstat_files(
         // pstat: *mut crate::freebsd::system::procstat,
         files: *mut crate::freebsd::system::filestat_list,
     ) -> ProcFiles {
         let mut procfile = ProcFiles::default();
-        let mut np = unsafe { *files }.stqh_first;
+        let mut np = (*files).stqh_first;
         loop {
             if np.is_null() {
                 break;
             }
             // println!("fd: {:?}", unsafe { *np }.fs_fd);
-            let flags = unsafe { *np }.fs_uflags as u32;
+            let flags = (*np).fs_uflags as u32;
 
             /*
             let mut vn = MaybeUninit::<vnstat>::zeroed();
@@ -160,20 +164,12 @@ impl Process {
             }
              */
             if flags & PS_FST_UFLAG_RDIR == PS_FST_UFLAG_RDIR {
-                procfile.root = Path::new(
-                    unsafe { CStr::from_ptr((*np).fs_path) }
-                        .to_str()
-                        .unwrap_or(""),
-                )
-                .to_path_buf();
+                procfile.root =
+                    Path::new(CStr::from_ptr((*np).fs_path).to_str().unwrap_or("")).to_path_buf();
             }
             if flags & PS_FST_UFLAG_CDIR == PS_FST_UFLAG_CDIR {
-                procfile.cwd = Path::new(
-                    unsafe { CStr::from_ptr((*np).fs_path) }
-                        .to_str()
-                        .unwrap_or(""),
-                )
-                .to_path_buf();
+                procfile.cwd =
+                    Path::new(CStr::from_ptr((*np).fs_path).to_str().unwrap_or("")).to_path_buf();
             }
             /*
             if flags & PS_FST_UFLAG_TEXT == PS_FST_UFLAG_TEXT {
@@ -183,7 +179,7 @@ impl Process {
                 println!("tty");
             }
             */
-            np = unsafe { *np }.next.stqe_next;
+            np = (*np).next.stqe_next;
         }
 
         procfile

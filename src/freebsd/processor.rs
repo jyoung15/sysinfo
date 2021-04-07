@@ -105,7 +105,7 @@ impl ProcessorSet {
         &self.cpus
     }
 
-    /// Make a new ProcessorSet
+    /// Make a new `ProcessorSet`
     pub fn new() -> Self {
         let mut proc = Self {
             num_cpus: 0,
@@ -220,6 +220,7 @@ impl ProcessorSet {
 
 impl Processor {
     /// Make a new Processor
+    #[must_use]
     pub fn new(common: ProcCommon) -> Self {
         let mut proc = Self {
             cpu_id: "cpu0".to_string(),
@@ -240,8 +241,7 @@ impl Processor {
 
     /// Update CPU times
     pub fn update_cp_time(&mut self, cp_time: CpuTime) {
-        // println!("update_cp_time for {}: {:?}", self.cpu_id, cp_time);
-        self.last_cp_time = self.cp_time.clone();
+        self.last_cp_time = self.cp_time;
         self.cp_time = cp_time;
     }
 
