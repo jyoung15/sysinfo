@@ -6,3 +6,5 @@
 #include <net/if.h>
 #include <net/if_mib.h>
 #include <libprocstat.h>
+#include <sys/ucred.h>
+#include <sys/mount.h>

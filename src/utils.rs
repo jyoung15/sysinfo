@@ -5,11 +5,26 @@
 //
 
 use crate::Pid;
-#[cfg(not(any(target_os = "windows", target_os = "unknown", target_arch = "wasm32")))]
+#[cfg(not(any(
+    target_os = "windows",
+    target_os = "unknown",
+    target_os = "freebsd",
+    target_arch = "wasm32"
+)))]
 use std::ffi::OsStr;
-#[cfg(not(any(target_os = "windows", target_os = "unknown", target_arch = "wasm32")))]
+#[cfg(not(any(
+    target_os = "windows",
+    target_os = "unknown",
+    target_os = "freebsd",
+    target_arch = "wasm32"
+)))]
 use std::os::unix::ffi::OsStrExt;
-#[cfg(not(any(target_os = "windows", target_os = "unknown", target_arch = "wasm32")))]
+#[cfg(not(any(
+    target_os = "windows",
+    target_os = "unknown",
+    target_os = "freebsd",
+    target_arch = "wasm32"
+)))]
 use std::path::Path;
 
 #[allow(clippy::useless_conversion)]
@@ -20,6 +35,7 @@ use std::path::Path;
     target_os = "macos",
     target_os = "ios"
 )))]
+#[cfg(not(target_os = "freebsd"))]
 pub fn realpath(original: &Path) -> std::path::PathBuf {
     use libc::{c_char, lstat, stat, S_IFLNK, S_IFMT};
     use std::fs;
@@ -52,7 +68,12 @@ pub fn realpath(original: &Path) -> std::path::PathBuf {
 }
 
 /* convert a path to a NUL-terminated Vec<u8> suitable for use with C functions */
-#[cfg(not(any(target_os = "windows", target_os = "unknown", target_arch = "wasm32")))]
+#[cfg(not(any(
+    target_os = "windows",
+    target_os = "unknown",
+    target_os = "freebsd",
+    target_arch = "wasm32"
+)))]
 pub fn to_cpath(path: &Path) -> Vec<u8> {
     let path_os: &OsStr = path.as_ref();
     let mut cpath = path_os.as_bytes().to_vec();
@@ -104,7 +125,10 @@ pub fn get_current_pid() -> Result<Pid, &'static str> {
 
 /// Converts the value into a parallel iterator (if the multithread feature is enabled)
 /// Uses the rayon::iter::IntoParallelIterator trait
-#[cfg_attr(any(target_os = "ios", feature = "apple-app-store"), allow(dead_code))]
+#[cfg_attr(
+    any(target_os = "ios", feature = "apple-app-store", target_os = "freebsd"),
+    allow(dead_code)
+)]
 #[cfg(feature = "multithread")]
 pub fn into_iter<T>(val: T) -> T::Iter
 where

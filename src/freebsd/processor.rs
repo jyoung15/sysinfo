@@ -1,7 +1,11 @@
-use crate::freebsd::sysctl_helpers::SysctlInner;
-use crate::ProcessorExt;
-use std::ops::Add;
-use std::ops::DivAssign;
+#![allow(clippy::module_name_repetitions)]
+#![allow(clippy::cast_sign_loss)]
+#![allow(clippy::cast_lossless)]
+#![allow(clippy::cast_possible_wrap)]
+#![allow(clippy::cast_precision_loss)]
+#![allow(clippy::cast_possible_truncation)]
+use crate::{freebsd::sysctl_helpers::SysctlInner, ProcessorExt};
+use std::ops::{Add, DivAssign};
 use sysctl::{Ctl, CtlValue, Sysctl};
 
 #[derive(Default, Clone, Debug, Copy, PartialEq)]
@@ -215,6 +219,11 @@ impl ProcessorSet {
         } else {
             sysinfo_debug!("could not determine CPU frequency");
         }
+    }
+
+    /// Get the number of CPUs
+    pub fn num_cpus(&self) -> u8 {
+        self.num_cpus
     }
 }
 

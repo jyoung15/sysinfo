@@ -1,19 +1,20 @@
 //
 // Sysinfo
 //
-
-#![allow(non_upper_case_globals)]
-#![allow(non_camel_case_types)]
-#![allow(non_snake_case)]
-#![allow(dead_code)]
-include!(concat!(env!("OUT_DIR"), "/freebsd_bindings.rs"));
-
+#![allow(clippy::similar_names)]
+#![allow(clippy::cast_sign_loss)]
+#![allow(clippy::cast_lossless)]
+#![allow(clippy::cast_possible_wrap)]
+#![allow(clippy::cast_precision_loss)]
+#![allow(clippy::cast_possible_truncation)]
 use std::{collections::HashMap, ffi::CStr, time::SystemTime};
 
 use crate::{
+    freebsd::disk::Mounts,
     freebsd::sysctl_helpers::SysctlInner,
     sys::{
         component::Component,
+        lib::*,
         process::{Process, ProcessStatus},
         processor::{Processor, ProcessorSet},
     },
@@ -25,6 +26,9 @@ use sysctl::{
     CtlValue::{self, Struct},
     Sysctl,
 };
+
+const DEFAULT_PAGESIZE: u64 = 4096;
+const DEFAULT_FSCALE: u64 = 2048;
 
 #[derive(Debug)]
 struct Group {
@@ -47,6 +51,8 @@ pub struct System {
     swap_free: u64,
     uptime: u64,
     boot_time: u64,
+    pagesize: u64,
+    fscale: u64,
 }
 
 impl Default for System {
@@ -65,6 +71,8 @@ impl Default for System {
             swap_free: 0,
             uptime: 0,
             boot_time: 0,
+            pagesize: DEFAULT_PAGESIZE,
+            fscale: DEFAULT_FSCALE,
         }
     }
 }
@@ -119,29 +127,33 @@ impl System {
         unsafe { setgrent() };
         loop {
             let grp_ptr = unsafe { getgrent() };
-            if grp_ptr == std::ptr::null_mut() {
+            if grp_ptr.is_null() {
                 break;
             }
             let grp = unsafe { *grp_ptr };
+            if grp.gr_name.is_null() {
+                break;
+            }
             let mut mem_index = 0;
             let mut members: Vec<String> = Vec::new();
             loop {
                 let mem_ptr = unsafe { grp.gr_mem.offset(mem_index) };
                 mem_index += 1;
-                if mem_ptr == std::ptr::null_mut() {
+                if mem_ptr.is_null() {
                     break;
                 }
                 let mem = unsafe { *mem_ptr };
-                if mem == std::ptr::null_mut() {
+                if mem.is_null() {
                     break;
                 }
                 members.push(
                     unsafe { CStr::from_ptr(mem) }
-                        .to_string_lossy()
-                        .into_owned(),
+                        .to_str()
+                        .unwrap_or("Unknown")
+                        .to_string(),
                 );
             }
-            if grp.gr_name == std::ptr::null_mut() {
+            if grp.gr_name.is_null() {
                 break;
             }
             ret.insert(
@@ -175,6 +187,18 @@ impl System {
             .collect()
     }
 
+    fn refresh_fscale(&mut self) {
+        self.fscale = Ctl::new("kern.fscale")
+            .and_then(|c| c.value())
+            .map_or(DEFAULT_FSCALE, |v| {
+                if let CtlValue::Int(fscale) = v {
+                    fscale as u64
+                } else {
+                    DEFAULT_FSCALE
+                }
+            });
+    }
+
     #[inline]
     fn u8s_to_f64(bytes: &[u8]) -> f64 {
         let lo = &bytes[0..2];
@@ -195,9 +219,6 @@ impl SystemExt for System {
         if refreshes.networks_list() {
             ret.refresh_networks_list();
         }
-        if refreshes.processes() {
-            ret.refresh_processes();
-        }
         if refreshes.disks_list() {
             ret.refresh_disks_list();
         }
@@ -206,6 +227,9 @@ impl SystemExt for System {
         }
         if refreshes.memory() {
             ret.refresh_memory();
+        }
+        if refreshes.processes() {
+            ret.refresh_processes();
         }
         if refreshes.cpu() {
             ret.refresh_cpu();
@@ -225,6 +249,7 @@ impl SystemExt for System {
     fn refresh_system(&mut self) {
         self.uptime = Self::get_uptime();
         self.boot_time = Self::boot_time();
+        self.refresh_fscale();
         self.refresh_memory();
         self.refresh_cpu();
         self.refresh_components_list();
@@ -234,9 +259,8 @@ impl SystemExt for System {
     fn refresh_memory(&mut self) {
         const SW_MULTIPLIER: i32 = 4;
         const KBITS_SHIFT: i32 = 10;
-        const DEFAULT_PAGESIZE: u64 = 4096;
 
-        let pagesize =
+        self.pagesize =
             Ctl::new("hw.pagesize")
                 .and_then(|c| c.value())
                 .map_or(DEFAULT_PAGESIZE, |v| {
@@ -260,7 +284,7 @@ impl SystemExt for System {
         self.mem_free = Ctl::new("vm.stats.vm.v_free_count")
             .map(|c| {
                 if let Ok(CtlValue::U32(free_count)) = c.value() {
-                    (u64::from(free_count) * pagesize) >> KBITS_SHIFT
+                    (u64::from(free_count) * self.pagesize) >> KBITS_SHIFT
                 } else {
                     0
                 }
@@ -319,111 +343,142 @@ impl SystemExt for System {
     fn refresh_processes(&mut self) {
         const MAX_PATHNAME_LEN: usize = 512;
         let pstat = unsafe { procstat_open_sysctl() };
+        if pstat.is_null() {
+            return;
+        }
         let mut pcount: u32 = 0;
         let kinfo = unsafe { procstat_getprocs(pstat, KERN_PROC_PROC as i32, 0, &mut pcount) };
-
-        for o in 0..pcount as isize {
-            let pid = unsafe { (*kinfo.offset(o)).ki_pid };
-            let ppid = unsafe { (*kinfo.offset(o)).ki_ppid };
-            let size = unsafe { (*kinfo.offset(o)).ki_size } as u64;
-            let ssize = unsafe { (*kinfo.offset(o)).ki_ssize } as u64;
-            let rssize = unsafe { (*kinfo.offset(o)).ki_rssize } as u64;
-            let stat = unsafe { (*kinfo.offset(o)).ki_stat };
-            let comm = unsafe { (*kinfo.offset(o)).ki_comm };
-            let start = unsafe { (*kinfo.offset(o)).ki_start };
-            let rusage = unsafe { (*kinfo.offset(o)).ki_rusage };
-            let pctcpu = unsafe { (*kinfo.offset(o)).ki_pctcpu };
-            let env =
-                unsafe { Process::procstat_to_argv(procstat_getenvv(pstat, kinfo.offset(o), 0)) };
-            let argv =
-                unsafe { Process::procstat_to_argv(procstat_getargv(pstat, kinfo.offset(o), 0)) };
-            let pstat_files = unsafe { procstat_getfiles(pstat, kinfo.offset(o), 0) };
-            let files = unsafe { Process::procstat_files(pstat_files) };
-            let mut pathname = [0_i8; MAX_PATHNAME_LEN];
-            if unsafe {
-                procstat_getpathname(
-                    pstat,
-                    kinfo.offset(o),
-                    pathname.as_mut_ptr(),
-                    MAX_PATHNAME_LEN as u64,
-                )
-            } != 0
-            {
-                pathname = [0_i8; MAX_PATHNAME_LEN];
-            }
-            self.pids.insert(
-                pid,
-                Process {
+        if !kinfo.is_null() {
+            for o in 0..pcount as isize {
+                /* Process identifier */
+                let pid = unsafe { (*kinfo.offset(o)).ki_pid };
+                /* Process identifier */
+                let ppid = unsafe { (*kinfo.offset(o)).ki_ppid };
+                /* virtual size */
+                let size = unsafe { (*kinfo.offset(o)).ki_size } as u64;
+                /* stack size (pages) */
+                let ssize = unsafe { (*kinfo.offset(o)).ki_ssize } as u64;
+                /* current resident set size in pages */
+                let rssize = unsafe { (*kinfo.offset(o)).ki_rssize } as u64;
+                /* S* process status */
+                let stat = unsafe { (*kinfo.offset(o)).ki_stat };
+                /* command name */
+                let comm = unsafe { (*kinfo.offset(o)).ki_comm };
+                /* starting time */
+                let start = unsafe { (*kinfo.offset(o)).ki_start };
+                /* process rusage statistics */
+                let rusage = unsafe { (*kinfo.offset(o)).ki_rusage };
+                /* %cpu for process during ki_swtime (fixpt_t) */
+                let pctcpu = unsafe { (*kinfo.offset(o)).ki_pctcpu };
+                /* Time averaged value of ki_cpticks */
+                let estcpu = unsafe { (*kinfo.offset(o)).ki_estcpu };
+                let env = unsafe {
+                    Process::procstat_to_argv(procstat_getenvv(pstat, kinfo.offset(o), 0))
+                };
+                let argv = unsafe {
+                    Process::procstat_to_argv(procstat_getargv(pstat, kinfo.offset(o), 0))
+                };
+                let pstat_files = unsafe { procstat_getfiles(pstat, kinfo.offset(o), 0) };
+                let files = unsafe { Process::procstat_files(pstat_files) };
+                let mut pathname = [0_i8; MAX_PATHNAME_LEN];
+                if unsafe {
+                    procstat_getpathname(
+                        pstat,
+                        kinfo.offset(o),
+                        pathname.as_mut_ptr(),
+                        MAX_PATHNAME_LEN as u64,
+                    )
+                } != 0
+                {
+                    pathname = [0_i8; MAX_PATHNAME_LEN];
+                }
+                self.pids.insert(
                     pid,
-                    ppid: Some(ppid),
-                    start: start.tv_sec as u64,
-                    comm: unsafe { CStr::from_ptr(comm.as_ptr()) }
-                        .to_str()
-                        .unwrap_or("")
-                        .to_string(),
-                    size,
-                    ssize,
-                    rssize,
-                    stat: num::FromPrimitive::from_i8(stat).unwrap_or(ProcessStatus::Unknown),
-                    env: env.clone(),
-                    argv: argv.clone(),
-                    files: files.clone(),
-                    exe: unsafe { CStr::from_ptr(pathname.as_ptr()) }
-                        .to_str()
-                        .unwrap_or("")
-                        .to_string(),
-                    disk_usage: DiskUsage {
-                        // TODO: separate total values from instantaneous values
-                        total_written_bytes: rusage.ru_oublock as u64,
-                        written_bytes: rusage.ru_oublock as u64,
-                        total_read_bytes: rusage.ru_inblock as u64,
-                        read_bytes: rusage.ru_inblock as u64,
+                    Process {
+                        pid,
+                        ppid: Some(ppid),
+                        start: start.tv_sec as u64,
+                        comm: unsafe { CStr::from_ptr(comm.as_ptr()) }
+                            .to_str()
+                            .unwrap_or("")
+                            .to_string(),
+                        size,
+                        ssize,
+                        rssize,
+                        stat: num::FromPrimitive::from_i8(stat).unwrap_or(ProcessStatus::Unknown),
+                        env: env.clone(),
+                        argv: argv.clone(),
+                        files: files.clone(),
+                        exe: unsafe { CStr::from_ptr(pathname.as_ptr()) }
+                            .to_str()
+                            .unwrap_or("")
+                            .to_string(),
+                        disk_usage: DiskUsage {
+                            // TODO: separate total values from instantaneous values
+                            total_written_bytes: rusage.ru_oublock as u64,
+                            written_bytes: rusage.ru_oublock as u64,
+                            total_read_bytes: rusage.ru_inblock as u64,
+                            read_bytes: rusage.ru_inblock as u64,
+                        },
+                        cpu: pctcpu as f32 / self.fscale as f32,
+                        estcpu,
+                        pagesize: self.pagesize,
                     },
-                    cpu: pctcpu as f32,
-                },
-            );
-            unsafe { procstat_freeargv(pstat) };
-            unsafe { procstat_freeenvv(pstat) };
-            unsafe { procstat_freefiles(pstat, pstat_files) };
+                );
+                unsafe { procstat_freeargv(pstat) };
+                unsafe { procstat_freeenvv(pstat) };
+                if !pstat_files.is_null() {
+                    unsafe { procstat_freefiles(pstat, pstat_files) };
+                }
+            }
+            unsafe { procstat_freeprocs(pstat, kinfo) };
         }
-        unsafe { procstat_freeprocs(pstat, kinfo) };
         unsafe { procstat_close(pstat) };
     }
 
     fn refresh_process(&mut self, pid: Pid) -> bool {
         let pstat = unsafe { procstat_open_sysctl() };
+        if pstat.is_null() {
+            return false;
+        }
+        let mut ret = false;
         let mut pcount: u32 = 0;
         let kinfo = unsafe { procstat_getprocs(pstat, KERN_PROC_PID as i32, pid, &mut pcount) };
-        let ret = if pcount == 1 {
+        if !kinfo.is_null() && pcount == 1 {
             let pid_1 = unsafe { (*kinfo).ki_pid };
             assert_eq!(pid_1, pid);
             let ppid = unsafe { (*kinfo).ki_ppid };
             let size = unsafe { (*kinfo).ki_size } as u64;
             let ssize = unsafe { (*kinfo).ki_ssize } as u64;
             let rssize = unsafe { (*kinfo).ki_rssize } as u64;
-            self.pids.get_mut(&pid).map_or(false, |proc| {
+            if let Some(proc) = self.pids.get_mut(&pid) {
                 (*proc).ppid = Some(ppid);
                 (*proc).size = size;
                 (*proc).ssize = ssize;
                 (*proc).rssize = rssize;
-                true
-            })
-        } else {
-            false
-        };
-        unsafe { procstat_freeprocs(pstat, kinfo) };
+            } else {
+                self.refresh_processes();
+            }
+            unsafe { procstat_freeprocs(pstat, kinfo) };
+            ret = true;
+        }
         unsafe { procstat_close(pstat) };
         ret
     }
 
-    fn refresh_disks_list(&mut self) {}
+    fn refresh_disks_list(&mut self) {
+        let mut mounts = Mounts::default();
+        unsafe { mounts.refresh_mounts() };
+        self.disks = mounts.get_mounts();
+    }
 
     fn refresh_users_list(&mut self) {
         self.groups = Self::get_groups();
+        self.users.clear();
         unsafe { setpwent() };
         loop {
             let pw = unsafe { getpwent() };
-            if pw == std::ptr::null_mut() {
+            if pw.is_null() {
                 break;
             }
             let pw_val = unsafe { *pw };
@@ -449,7 +504,8 @@ impl SystemExt for System {
     }
 
     fn get_process(&self, pid: Pid) -> Option<&Process> {
-        self.pids.get(&pid)
+        let ret = self.pids.get(&pid);
+        ret
     }
 
     fn get_process_by_name(&self, name: &str) -> Vec<&Process> {
@@ -465,7 +521,7 @@ impl SystemExt for System {
     }
 
     fn get_physical_core_count(&self) -> Option<usize> {
-        None
+        Some(self.processors.num_cpus() as usize)
     }
 
     fn get_total_memory(&self) -> u64 {
@@ -505,7 +561,7 @@ impl SystemExt for System {
     }
 
     fn get_disks(&self) -> &[Disk] {
-        todo!()
+        self.disks.as_slice()
     }
 
     fn get_users(&self) -> &[User] {

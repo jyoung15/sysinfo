@@ -1,10 +1,11 @@
-#![allow(non_upper_case_globals)]
-#![allow(non_camel_case_types)]
-#![allow(non_snake_case)]
-#![allow(dead_code)]
-include!(concat!(env!("OUT_DIR"), "/freebsd_bindings.rs"));
+#![allow(clippy::module_name_repetitions)]
+#![allow(clippy::cast_sign_loss)]
+#![allow(clippy::cast_lossless)]
+#![allow(clippy::cast_possible_wrap)]
+#![allow(clippy::cast_precision_loss)]
+#![allow(clippy::cast_possible_truncation)]
 
-use crate::{NetworkExt, NetworksExt, NetworksIter};
+use crate::{sys::lib::*, NetworkExt, NetworksExt, NetworksIter};
 use std::collections::HashMap;
 use sysctl::{Ctl, Sysctl};
 

@@ -1,5 +1,9 @@
-use crate::freebsd::sysctl_helpers::SysctlInner;
-use crate::ComponentExt;
+#![allow(clippy::cast_sign_loss)]
+#![allow(clippy::cast_lossless)]
+#![allow(clippy::cast_possible_wrap)]
+#![allow(clippy::cast_precision_loss)]
+#![allow(clippy::cast_possible_truncation)]
+use crate::{freebsd::sysctl_helpers::SysctlInner, ComponentExt};
 
 use sysctl::{Ctl, Sysctl};
 
