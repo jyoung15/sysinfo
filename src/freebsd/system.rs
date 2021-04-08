@@ -371,7 +371,7 @@ impl SystemExt for System {
                 /* %cpu for process during ki_swtime (fixpt_t) */
                 let pctcpu = unsafe { (*kinfo.offset(o)).ki_pctcpu };
                 /* Time averaged value of ki_cpticks */
-                let estcpu = unsafe { (*kinfo.offset(o)).ki_estcpu };
+                // let estcpu = unsafe { (*kinfo.offset(o)).ki_estcpu };
                 let env = unsafe {
                     Process::procstat_to_argv(procstat_getenvv(pstat, kinfo.offset(o), 0))
                 };
@@ -421,7 +421,7 @@ impl SystemExt for System {
                             read_bytes: rusage.ru_inblock as u64,
                         },
                         cpu: pctcpu as f32 / self.fscale as f32,
-                        estcpu,
+                        // estcpu,
                         pagesize: self.pagesize,
                     },
                 );

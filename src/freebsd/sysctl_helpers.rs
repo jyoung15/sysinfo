@@ -14,7 +14,7 @@ macro_rules! sysctl_value {
     };
 }
 
-pub(crate) trait SysctlInner {
+pub(super) trait SysctlInner {
     fn node_value(self) -> Option<Vec<u8>>;
     fn int_value(self) -> Option<i32>;
     fn string_value(self) -> Option<String>;

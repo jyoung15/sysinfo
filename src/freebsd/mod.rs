@@ -5,11 +5,11 @@
 
 pub mod component;
 pub mod disk;
-pub mod lib;
+mod lib;
 pub mod network;
 pub mod process;
 pub mod processor;
-pub mod sysctl_helpers;
+mod sysctl_helpers;
 pub mod system;
 
 pub use self::component::Component;

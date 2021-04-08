@@ -44,7 +44,7 @@ impl Default for ProcessStatus {
 
 /// Process File Info
 #[derive(Default, Clone)]
-pub struct ProcFiles {
+pub(super) struct ProcFiles {
     root: PathBuf,
     cwd: PathBuf,
 }
@@ -53,44 +53,44 @@ pub struct ProcFiles {
 #[derive(Default)]
 pub struct Process {
     /// PID
-    pub pid: Pid,
+    pub(super) pid: Pid,
     /// Parent PID
-    pub ppid: Option<Pid>,
+    pub(super) ppid: Option<Pid>,
     /// Start Time
-    pub start: u64,
+    pub(super) start: u64,
     /// Command Name
-    pub comm: String,
+    pub(super) comm: String,
     /// Virtual Memory
-    pub size: u64,
+    pub(super) size: u64,
     /// RSS Memory
-    pub rssize: u64,
+    pub(super) rssize: u64,
     /// Stack Size
-    pub ssize: u64,
+    pub(super) ssize: u64,
     /// Process Status
-    pub stat: ProcessStatus,
+    pub(super) stat: ProcessStatus,
     /// Environment Variables
-    pub env: Vec<String>,
+    pub(super) env: Vec<String>,
     /// Arguments
-    pub argv: Vec<String>,
+    pub(super) argv: Vec<String>,
     /// Process File Info
-    pub files: ProcFiles,
+    pub(super) files: ProcFiles,
     /// Executable File
-    pub exe: String,
+    pub(super) exe: String,
     /// CPU Usage
-    pub cpu: f32,
-    /// Time averaged value of ki_cpticks
-    pub estcpu: u32,
+    pub(super) cpu: f32,
+    // /// Time averaged value of ki_cpticks
+    // pub(super) estcpu: u32,
     /// Disk Usage
-    pub disk_usage: DiskUsage,
+    pub(super) disk_usage: DiskUsage,
     /// Page Size
-    pub pagesize: u64,
+    pub(super) pagesize: u64,
 }
 
 impl Process {
     /// # Safety
     /// Convert value returned from `procstat_getenvv` to `HashMap`
     /// Takes a **char pointer
-    pub unsafe fn procstat_to_argv(raw: *mut *mut i8) -> Vec<String> {
+    pub(super) unsafe fn procstat_to_argv(raw: *mut *mut i8) -> Vec<String> {
         if raw.is_null() {
             Vec::new()
         } else {
@@ -116,7 +116,7 @@ impl Process {
     /// # Safety
     /// Convert result from `procstat_getfiles` to `ProcFiles`
     /// Takes a `filestat_list` pointer
-    pub unsafe fn procstat_files(files: *mut filestat_list) -> ProcFiles {
+    pub(super) unsafe fn procstat_files(files: *mut filestat_list) -> ProcFiles {
         if files.is_null() {
             ProcFiles::default()
         } else {

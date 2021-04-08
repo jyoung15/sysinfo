@@ -83,11 +83,11 @@ impl DiskExt for Disk {
 }
 
 #[derive(Default, Debug)]
-pub struct Mounts(Vec<Disk>);
+pub(super) struct Mounts(Vec<Disk>);
 
 impl Mounts {
     /// Update list of mounted filesystems
-    pub unsafe fn refresh_mounts(&mut self) {
+    pub(super) unsafe fn refresh_mounts(&mut self) {
         const MAX_MOUNTS: usize = 1024;
         let mount_count = getfsstat(std::ptr::null_mut(), 0, MNT_WAIT as i32) as usize;
         assert!(mount_count <= MAX_MOUNTS);
@@ -129,7 +129,7 @@ impl Mounts {
     // TODO: determine if HDD, SSD, Removable, Unknown
     // May require special permissions for cam(3) and xpt(4)
     // Possibly relevant sysctls: kern.cam.da.0.rotating
-    pub fn get_disk_type(f_type: u32, f_flags: u64) -> DiskType {
+    fn get_disk_type(f_type: u32, f_flags: u64) -> DiskType {
         if f_flags & MNT_AUTOMOUNTED == MNT_AUTOMOUNTED {
             DiskType::Removable
         } else {
@@ -137,7 +137,7 @@ impl Mounts {
         }
     }
 
-    pub fn get_mounts(self) -> Vec<Disk> {
+    pub(super) fn get_mounts(self) -> Vec<Disk> {
         self.0
     }
 }

@@ -9,7 +9,7 @@ use std::ops::{Add, DivAssign};
 use sysctl::{Ctl, CtlValue, Sysctl};
 
 #[derive(Default, Clone, Debug, Copy, PartialEq)]
-pub struct CpuTime {
+struct CpuTime {
     user_time: i64,
     nice_time: i64,
     system_time: i64,
@@ -18,7 +18,7 @@ pub struct CpuTime {
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
-pub struct CpuPct {
+struct CpuPct {
     user_pct: f32,
     nice_pct: f32,
     system_pct: f32,
@@ -57,7 +57,7 @@ impl CpuPct {
 }
 
 impl CpuTime {
-    pub fn pct_diff(&self, previous: &Self) -> Option<CpuPct> {
+    fn pct_diff(&self, previous: &Self) -> Option<CpuPct> {
         let user_diff = (self.user_time - previous.user_time) as f32;
         let nice_diff = (self.nice_time - previous.nice_time) as f32;
         let system_diff = (self.system_time - previous.system_time) as f32;
@@ -79,7 +79,7 @@ impl CpuTime {
 }
 
 #[derive(Default, Clone)]
-pub struct ProcCommon {
+struct ProcCommon {
     frequency: u64,
     vendor_id: String,
     brand: String,
@@ -87,7 +87,7 @@ pub struct ProcCommon {
 
 /// A set of Processors
 #[derive(Default, Clone)]
-pub struct ProcessorSet {
+pub(super) struct ProcessorSet {
     num_cpus: u8,
     cpus: Vec<Processor>,
     common: ProcCommon,
@@ -105,12 +105,12 @@ pub struct Processor {
 }
 
 impl ProcessorSet {
-    pub fn get_cpus(&self) -> &Vec<Processor> {
+    pub(super) fn get_cpus(&self) -> &Vec<Processor> {
         &self.cpus
     }
 
     /// Make a new `ProcessorSet`
-    pub fn new() -> Self {
+    pub(super) fn new() -> Self {
         let mut proc = Self {
             num_cpus: 0,
             cpus: Vec::new(),
@@ -126,12 +126,12 @@ impl ProcessorSet {
         proc
     }
 
-    pub fn get_global_processor(&self) -> &Processor {
+    pub(super) fn get_global_processor(&self) -> &Processor {
         &self.global
     }
 
     /// Refresh Processor Details
-    pub fn refresh_all(&mut self) {
+    pub(super) fn refresh_all(&mut self) {
         self.refresh_num_cpus();
         self.refresh_vendor_id();
         self.refresh_brand();
@@ -198,7 +198,7 @@ impl ProcessorSet {
         }
     }
 
-    pub fn refresh_num_cpus(&mut self) {
+    fn refresh_num_cpus(&mut self) {
         if let Some(hw_ncpu) = Ctl::new("hw.ncpu").int_value() {
             self.num_cpus = hw_ncpu as u8;
             if self.num_cpus != self.cpus.len() as u8 {
@@ -222,7 +222,7 @@ impl ProcessorSet {
     }
 
     /// Get the number of CPUs
-    pub fn num_cpus(&self) -> u8 {
+    pub(super) fn num_cpus(&self) -> u8 {
         self.num_cpus
     }
 }
@@ -230,7 +230,7 @@ impl ProcessorSet {
 impl Processor {
     /// Make a new Processor
     #[must_use]
-    pub fn new(common: ProcCommon) -> Self {
+    fn new(common: ProcCommon) -> Self {
         let mut proc = Self {
             cpu_id: "cpu0".to_string(),
             cp_time: CpuTime::default(),
@@ -243,13 +243,13 @@ impl Processor {
     }
 
     /// Refresh Processor Details
-    pub fn refresh_all(&mut self, common: ProcCommon) {
+    fn refresh_all(&mut self, common: ProcCommon) {
         self.common = common;
         self.refresh_and_get_cpu_usages()
     }
 
     /// Update CPU times
-    pub fn update_cp_time(&mut self, cp_time: CpuTime) {
+    fn update_cp_time(&mut self, cp_time: CpuTime) {
         self.last_cp_time = self.cp_time;
         self.cp_time = cp_time;
     }
@@ -261,7 +261,7 @@ impl Processor {
     }
 
     /// Set the CPU ID
-    pub fn set_cpu_id(&mut self, cpu_id: String) {
+    fn set_cpu_id(&mut self, cpu_id: String) {
         self.cpu_id = cpu_id;
     }
 }
