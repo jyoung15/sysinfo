@@ -10,7 +10,7 @@
 use std::{collections::HashMap, ffi::CStr, time::SystemTime};
 
 use crate::{
-    freebsd::disk::Mounts,
+    freebsd::disk::{Geom, Mounts},
     freebsd::sysctl_helpers::SysctlInner,
     sys::{
         component::Component,
@@ -44,6 +44,7 @@ pub struct System {
     components: Vec<Component>,
     processors: ProcessorSet,
     disks: Vec<Disk>,
+    geoms: Vec<Geom>,
     networks: Networks,
     mem_free: u64,
     mem_total: u64,
@@ -65,6 +66,7 @@ impl Default for System {
             processors: ProcessorSet::new(),
             networks: Networks::default(),
             disks: Vec::new(),
+            geoms: Vec::new(),
             mem_free: 0,
             mem_total: 0,
             swap_total: 0,
@@ -341,7 +343,7 @@ impl SystemExt for System {
     }
 
     fn refresh_processes(&mut self) {
-        const MAX_PATHNAME_LEN: usize = 512;
+        const MAX_PATHNAME_LEN: usize = 1024;
         let pstat = unsafe { procstat_open_sysctl() };
         if pstat.is_null() {
             return;
@@ -382,6 +384,12 @@ impl SystemExt for System {
                 let files = unsafe { Process::procstat_files(pstat_files) };
                 let mut pathname = [0_i8; MAX_PATHNAME_LEN];
                 if unsafe {
+                    /*
+                    procstat_getpathname may fail and
+                    "sysctl: kern.proc.pathname: XXXXX: No such file or directory" errors may appear.
+                    Same behavior is seen with `procstat -ab`.
+                    This is a best-effort lookup. See vn_fullpath(9)
+                    */
                     procstat_getpathname(
                         pstat,
                         kinfo.offset(o),
@@ -420,7 +428,7 @@ impl SystemExt for System {
                             total_read_bytes: rusage.ru_inblock as u64,
                             read_bytes: rusage.ru_inblock as u64,
                         },
-                        cpu: pctcpu as f32 / self.fscale as f32,
+                        cpu: 100.0 * pctcpu as f32 / self.fscale as f32,
                         // estcpu,
                         pagesize: self.pagesize,
                     },
@@ -470,6 +478,7 @@ impl SystemExt for System {
         let mut mounts = Mounts::default();
         unsafe { mounts.refresh_mounts() };
         self.disks = mounts.get_mounts();
+        self.geoms = Geom::get_geoms();
     }
 
     fn refresh_users_list(&mut self) {
