@@ -211,7 +211,6 @@ impl System {
                         vendor_id.clone(),
                         brand.clone(),
                     ));
-                    i += 1;
                 } else {
                     parts.next(); // we don't want the name again
                     self.processors[i].set(
@@ -227,8 +226,8 @@ impl System {
                         parts.next().map(|v| to_u64(v)).unwrap_or(0),
                     );
                     self.processors[i].frequency = get_cpu_frequency(i);
-                    i += 1;
                 }
+                i += 1;
                 count += 1;
                 if let Some(limit) = limit {
                     if count >= limit {
@@ -348,7 +347,7 @@ impl SystemExt for System {
         ) {
             Ok((Some(p), pid)) => {
                 self.process_list.tasks.insert(pid, p);
-                false
+                true
             }
             Ok(_) => true,
             Err(_) => false,
@@ -487,8 +486,18 @@ impl SystemExt for System {
         &self.users
     }
 
+    #[cfg(not(target_os = "android"))]
     fn get_name(&self) -> Option<String> {
-        get_system_info(InfoType::Name)
+        get_system_info_linux(
+            InfoType::Name,
+            Path::new("/etc/os-release"),
+            Path::new("/etc/lsb-release"),
+        )
+    }
+
+    #[cfg(target_os = "android")]
+    fn get_name(&self) -> Option<String> {
+        get_system_info_android(InfoType::Name)
     }
 
     fn get_long_os_version(&self) -> Option<String> {
@@ -540,8 +549,18 @@ impl SystemExt for System {
         }
     }
 
+    #[cfg(not(target_os = "android"))]
     fn get_os_version(&self) -> Option<String> {
-        get_system_info(InfoType::OsVersion)
+        get_system_info_linux(
+            InfoType::OsVersion,
+            Path::new("/etc/os-release"),
+            Path::new("/etc/lsb-release"),
+        )
+    }
+
+    #[cfg(target_os = "android")]
+    fn get_os_version(&self) -> Option<String> {
+        get_system_info_android(InfoType::OsVersion)
     }
 }
 
@@ -737,12 +756,14 @@ fn parse_stat_file(data: &str) -> Result<Vec<&str>, ()> {
     let mut parts = Vec::with_capacity(52);
     let mut data_it = data.splitn(2, ' ');
     parts.push(unwrap_or_return!(data_it.next()));
-    // The following loses the ) from the input, but that's ok because
-    // we're not using it anyway.
     let mut data_it = unwrap_or_return!(data_it.next()).rsplitn(2, ')');
     let data = unwrap_or_return!(data_it.next());
     parts.push(unwrap_or_return!(data_it.next()));
     parts.extend(data.split_whitespace());
+    // Remove command name '('
+    if let Some(name) = parts[1].strip_prefix("(") {
+        parts[1] = name;
+    }
     Ok(parts)
 }
 
@@ -757,26 +778,7 @@ fn check_nb_open_files(f: File) -> Option<File> {
     None
 }
 
-fn get_exe_name(p: &Process) -> String {
-    p.cmd
-        .get(0)
-        .map(|x| {
-            let cmd = x.split('\0').next().unwrap_or("");
-            if cmd.starts_with('/') {
-                // If this is an absolute path, it means we were able to get the path through
-                // /proc/[PID]/exe
-                cmd.split('/')
-                    .last()
-                    .map(|x| x.to_owned())
-                    .unwrap_or_else(String::new)
-            } else {
-                // Apparently we couldn't get the path so we can assume this is the full name...
-                cmd.to_owned()
-            }
-        })
-        .unwrap_or_else(String::new)
-}
-
+#[derive(PartialEq)]
 enum InfoType {
     /// The end-user friendly name of:
     /// - Android: The device model
@@ -786,15 +788,33 @@ enum InfoType {
 }
 
 #[cfg(not(target_os = "android"))]
-fn get_system_info(info: InfoType) -> Option<String> {
+fn get_system_info_linux(info: InfoType, path: &Path, fallback_path: &Path) -> Option<String> {
+    if let Ok(f) = File::open(path) {
+        let reader = BufReader::new(f);
+
+        let info_str = match info {
+            InfoType::Name => "NAME=",
+            InfoType::OsVersion => "VERSION_ID=",
+        };
+
+        for line in reader.lines().flatten() {
+            if let Some(stripped) = line.strip_prefix(info_str) {
+                return Some(stripped.replace("\"", ""));
+            }
+        }
+    }
+
+    // Fallback to `/etc/lsb-release` file for systems where VERSION_ID is not included.
+    // VERSION_ID is not required in the `/etc/os-release` file
+    // per https://www.linux.org/docs/man5/os-release.html
+    // If this fails for some reason, fallback to None
+    let reader = BufReader::new(File::open(fallback_path).ok()?);
+
     let info_str = match info {
-        InfoType::Name => "NAME=",
-        InfoType::OsVersion => "VERSION_ID=",
+        InfoType::OsVersion => "DISTRIB_RELEASE=",
+        InfoType::Name => "DISTRIB_ID=",
     };
-
-    let buf = BufReader::new(File::open("/etc/os-release").ok()?);
-
-    for line in buf.lines().flatten() {
+    for line in reader.lines().flatten() {
         if let Some(stripped) = line.strip_prefix(info_str) {
             return Some(stripped.replace("\"", ""));
         }
@@ -803,7 +823,7 @@ fn get_system_info(info: InfoType) -> Option<String> {
 }
 
 #[cfg(target_os = "android")]
-fn get_system_info(info: InfoType) -> Option<String> {
+fn get_system_info_android(info: InfoType) -> Option<String> {
     use libc::c_int;
 
     // https://android.googlesource.com/platform/bionic/+/refs/heads/master/libc/include/sys/system_properties.h#41
@@ -894,6 +914,7 @@ fn _get_process_data(
     let data = get_all_data_from_file(&mut file, 1024).map_err(|_| ())?;
     let stat_file = check_nb_open_files(file);
     let parts = parse_stat_file(&data)?;
+    let name = parts[1];
 
     let parent_pid = if proc_list.pid != 0 {
         Some(proc_list.pid)
@@ -931,6 +952,7 @@ fn _get_process_data(
         p.cwd = proc_list.cwd.clone();
         p.root = proc_list.root.clone();
     } else {
+        p.name = name.into();
         tmp.pop();
         tmp.push("cmdline");
         p.cmd = copy_from_file(&tmp);
@@ -938,18 +960,10 @@ fn _get_process_data(
         tmp.push("exe");
         match tmp.read_link() {
             Ok(exe_path) => {
-                p.name = exe_path
-                    .file_name()
-                    .and_then(|s| {
-                        let s: &str = s.to_str()?;
-                        Some(s.to_owned())
-                    })
-                    .unwrap_or_else(|| get_exe_name(&p));
                 p.exe = exe_path;
             }
             Err(_) => {
                 p.exe = PathBuf::new();
-                p.name = get_exe_name(&p);
             }
         }
         tmp.pop();
@@ -1034,5 +1048,77 @@ fn get_secs_since_epoch() -> u64 {
     match SystemTime::now().duration_since(SystemTime::UNIX_EPOCH) {
         Ok(n) => n.as_secs(),
         _ => panic!("SystemTime before UNIX EPOCH!"),
+    }
+}
+
+#[cfg(test)]
+mod test {
+    #[cfg(target_os = "android")]
+    use super::get_system_info_android;
+    #[cfg(not(target_os = "android"))]
+    use super::get_system_info_linux;
+    use super::InfoType;
+
+    #[test]
+    #[cfg(target_os = "android")]
+    fn lsb_release_fallback_android() {
+        assert!(get_system_info_android(InfoType::OsVersion).is_some());
+        assert!(get_system_info_android(InfoType::Name).is_some());
+    }
+
+    #[test]
+    #[cfg(not(target_os = "android"))]
+    fn lsb_release_fallback_not_android() {
+        use std::path::Path;
+
+        let dir = tempfile::tempdir().expect("failed to create temporary directory");
+        let tmp1 = dir.path().join("tmp1");
+        let tmp2 = dir.path().join("tmp2");
+
+        // /etc/os-release
+        std::fs::write(
+            &tmp1,
+            r#"NAME="Ubuntu"
+VERSION="20.10 (Groovy Gorilla)"
+ID=ubuntu
+ID_LIKE=debian
+PRETTY_NAME="Ubuntu 20.10"
+VERSION_ID="20.10"
+VERSION_CODENAME=groovy
+UBUNTU_CODENAME=groovy
+"#,
+        )
+        .expect("Failed to create tmp1");
+
+        // /etc/lsb-release
+        std::fs::write(
+            &tmp2,
+            r#"DISTRIB_ID=Ubuntu
+DISTRIB_RELEASE=20.10
+DISTRIB_CODENAME=groovy
+DISTRIB_DESCRIPTION="Ubuntu 20.10"
+"#,
+        )
+        .expect("Failed to create tmp2");
+
+        // Check for the "normal" path: "/etc/os-release"
+        assert_eq!(
+            get_system_info_linux(InfoType::OsVersion, &tmp1, Path::new("")),
+            Some("20.10".to_owned())
+        );
+        assert_eq!(
+            get_system_info_linux(InfoType::Name, &tmp1, Path::new("")),
+            Some("Ubuntu".to_owned())
+        );
+
+        // Check for the "fallback" path: "/etc/lsb-release"
+        assert_eq!(
+            get_system_info_linux(InfoType::OsVersion, Path::new(""), &tmp2),
+            Some("20.10".to_owned())
+        );
+        assert_eq!(
+            get_system_info_linux(InfoType::Name, Path::new(""), &tmp2),
+            Some("Ubuntu".to_owned())
+        );
     }
 }

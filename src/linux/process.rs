@@ -73,7 +73,7 @@ impl From<char> for ProcessStatus {
 
 impl ProcessStatus {
     /// Used to display `ProcessStatus`.
-    pub fn to_string(&self) -> &str {
+    pub fn as_str(&self) -> &str {
         match *self {
             ProcessStatus::Idle => "Idle",
             ProcessStatus::Run => "Runnable",
@@ -92,7 +92,7 @@ impl ProcessStatus {
 
 impl fmt::Display for ProcessStatus {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}", self.to_string())
+        f.write_str(self.as_str())
     }
 }
 
@@ -244,6 +244,11 @@ impl Drop for Process {
 }
 
 pub fn compute_cpu_usage(p: &mut Process, nb_processors: u64, total_time: f32) {
+    // First time updating the values without reference, wait for a second cycle to update cpu_usage
+    if p.old_utime == 0 && p.old_stime == 0 {
+        return;
+    }
+
     p.cpu_usage =
         ((p.utime - p.old_utime + p.stime - p.old_stime) * nb_processors * 100) as f32 / total_time;
     p.updated = false;

@@ -50,10 +50,9 @@
 #![crate_name = "sysinfo"]
 #![crate_type = "lib"]
 #![crate_type = "rlib"]
+#![allow(unknown_lints)]
 #![deny(missing_docs)]
 #![deny(broken_intra_doc_links)]
-//#![deny(warnings)]
-#![allow(unknown_lints)]
 #![allow(clippy::upper_case_acronyms)]
 #![allow(renamed_and_removed_lints)]
 
@@ -62,13 +61,13 @@ doc_comment::doctest!("../README.md");
 
 #[cfg(feature = "debug")]
 #[doc(hidden)]
+#[allow(unused)]
 macro_rules! sysinfo_debug {
     ($($x:tt)*) => {{
         eprintln!($($x)*);
     }}
 }
 
-#[cfg(not(target_os = "ios"))]
 #[cfg(not(feature = "debug"))]
 #[doc(hidden)]
 macro_rules! sysinfo_debug {
@@ -198,6 +197,32 @@ mod test {
         );
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn check_cpu_usage() {
+        let mut s = System::new();
+
+        s.refresh_all();
+        // All CPU usage will start at zero until the second refresh
+        assert_eq!(
+            s.get_processes()
+                .iter()
+                .all(|(_, proc_)| proc_.cpu_usage() == 0.0),
+            true
+        );
+
+        // Wait a bit to update CPU usage values
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        s.refresh_all();
+        assert_eq!(
+            s.get_processes()
+                .iter()
+                .all(|(_, proc_)| proc_.cpu_usage() >= 0.0
+                    && proc_.cpu_usage() <= (s.get_processors().len() as f32) * 100.0),
+            true
+        );
+    }
+
     #[test]
     fn check_users() {
         let mut s = System::new();
@@ -273,6 +298,20 @@ mod test {
                 .get_host_name()
                 .expect("Failed to get host name")
                 .is_empty());
+        }
+    }
+
+    #[test]
+    fn check_refresh_process_return_value() {
+        // We don't want to test on unknown systems.
+        if MIN_USERS > 0 {
+            let pid = get_current_pid().expect("Failed to get current PID");
+            let mut s = System::new();
+
+            // First check what happens in case the process isn't already in our process list.
+            assert!(s.refresh_process(pid));
+            // Then check that it still returns true if the process is already in our process list.
+            assert!(s.refresh_process(pid));
         }
     }
 }

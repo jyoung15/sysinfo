@@ -26,7 +26,9 @@ use std::sync::Arc;
 #[cfg(all(target_os = "macos", not(feature = "apple-app-store")))]
 use libc::size_t;
 
-use libc::{self, c_char, c_int, c_void, sysconf, _SC_PAGESIZE};
+use libc::{
+    c_char, c_int, c_void, mach_port_t, sysconf, sysctl, sysctlbyname, timeval, _SC_PAGESIZE,
+};
 
 /// Structs containing system's information.
 pub struct System {
@@ -45,13 +47,15 @@ pub struct System {
     connection: Option<ffi::io_connect_t>,
     disks: Vec<Disk>,
     networks: Networks,
-    port: ffi::mach_port_t,
+    port: mach_port_t,
     users: Vec<User>,
     boot_time: u64,
     // Used to get disk information, to be more specific, it's needed by the
     // DADiskCreateFromVolumePath function. Not supported on iOS.
     #[cfg(target_os = "macos")]
     session: ffi::SessionWrap,
+    #[cfg(target_os = "macos")]
+    clock_info: Option<crate::sys::macos::system::SystemTimeInfo>,
 }
 
 impl Drop for System {
@@ -96,17 +100,17 @@ impl System {
 }
 
 fn boot_time() -> u64 {
-    let mut boot_time = libc::timeval {
+    let mut boot_time = timeval {
         tv_sec: 0,
         tv_usec: 0,
     };
-    let mut len = std::mem::size_of::<libc::timeval>();
-    let mut mib: [libc::c_int; 2] = [libc::CTL_KERN, libc::KERN_BOOTTIME];
+    let mut len = std::mem::size_of::<timeval>();
+    let mut mib: [c_int; 2] = [libc::CTL_KERN, libc::KERN_BOOTTIME];
     if unsafe {
-        libc::sysctl(
+        sysctl(
             mib.as_mut_ptr(),
             2,
-            &mut boot_time as *mut libc::timeval as *mut _,
+            &mut boot_time as *mut timeval as *mut _,
             &mut len,
             std::ptr::null_mut(),
             0,
@@ -144,6 +148,8 @@ impl SystemExt for System {
             boot_time: boot_time(),
             #[cfg(target_os = "macos")]
             session: ffi::SessionWrap(::std::ptr::null_mut()),
+            #[cfg(target_os = "macos")]
+            clock_info: crate::sys::macos::system::SystemTimeInfo::new(port),
         };
         s.refresh_specifics(refreshes);
         s
@@ -157,8 +163,8 @@ impl SystemExt for System {
             // get swap info
             let mut xs: ffi::xsw_usage = mem::zeroed::<ffi::xsw_usage>();
             if get_sys_value(
-                ffi::CTL_VM,
-                ffi::VM_SWAPUSAGE,
+                libc::CTL_VM as _,
+                libc::VM_SWAPUSAGE as _,
                 mem::size_of::<ffi::xsw_usage>(),
                 &mut xs as *mut ffi::xsw_usage as *mut c_void,
                 &mut mib,
@@ -169,8 +175,8 @@ impl SystemExt for System {
             // get ram info
             if self.mem_total < 1 {
                 get_sys_value(
-                    ffi::CTL_HW,
-                    ffi::HW_MEMSIZE,
+                    libc::CTL_HW as _,
+                    libc::HW_MEMSIZE as _,
                     mem::size_of::<u64>(),
                     &mut self.mem_total as *mut u64 as *mut c_void,
                     &mut mib,
@@ -238,37 +244,37 @@ impl SystemExt for System {
         unsafe {
             if ffi::host_processor_info(
                 self.port,
-                ffi::PROCESSOR_CPU_LOAD_INFO,
+                libc::PROCESSOR_CPU_LOAD_INFO,
                 &mut num_cpu_u as *mut u32,
                 &mut cpu_info as *mut *mut i32,
                 &mut num_cpu_info as *mut u32,
             ) == ffi::KERN_SUCCESS
             {
                 let proc_data = Arc::new(ProcessorData::new(cpu_info, num_cpu_info));
-                for (i, proc_) in self.processors.iter_mut().enumerate() {
+                let mut add = 0;
+                for proc_ in self.processors.iter_mut() {
                     let old_proc_data = &*proc_.get_data();
-                    let in_use =
-                        (*cpu_info.offset(
-                            (ffi::CPU_STATE_MAX * i) as isize + ffi::CPU_STATE_USER as isize,
-                        ) - *old_proc_data.cpu_info.offset(
-                            (ffi::CPU_STATE_MAX * i) as isize + ffi::CPU_STATE_USER as isize,
-                        )) + (*cpu_info.offset(
-                            (ffi::CPU_STATE_MAX * i) as isize + ffi::CPU_STATE_SYSTEM as isize,
-                        ) - *old_proc_data.cpu_info.offset(
-                            (ffi::CPU_STATE_MAX * i) as isize + ffi::CPU_STATE_SYSTEM as isize,
-                        )) + (*cpu_info.offset(
-                            (ffi::CPU_STATE_MAX * i) as isize + ffi::CPU_STATE_NICE as isize,
-                        ) - *old_proc_data.cpu_info.offset(
-                            (ffi::CPU_STATE_MAX * i) as isize + ffi::CPU_STATE_NICE as isize,
-                        ));
+                    let in_use = (*cpu_info.offset(add as isize + libc::CPU_STATE_USER as isize)
+                        - *old_proc_data
+                            .cpu_info
+                            .offset(add as isize + libc::CPU_STATE_USER as isize))
+                        + (*cpu_info.offset(add as isize + libc::CPU_STATE_SYSTEM as isize)
+                            - *old_proc_data
+                                .cpu_info
+                                .offset(add as isize + libc::CPU_STATE_SYSTEM as isize))
+                        + (*cpu_info.offset(add as isize + libc::CPU_STATE_NICE as isize)
+                            - *old_proc_data
+                                .cpu_info
+                                .offset(add as isize + libc::CPU_STATE_NICE as isize));
                     let total = in_use
-                        + (*cpu_info.offset(
-                            (ffi::CPU_STATE_MAX * i) as isize + ffi::CPU_STATE_IDLE as isize,
-                        ) - *old_proc_data.cpu_info.offset(
-                            (ffi::CPU_STATE_MAX * i) as isize + ffi::CPU_STATE_IDLE as isize,
-                        ));
+                        + (*cpu_info.offset(add as isize + libc::CPU_STATE_IDLE as isize)
+                            - *old_proc_data
+                                .cpu_info
+                                .offset(add as isize + libc::CPU_STATE_IDLE as isize));
                     proc_.update(in_use as f32 / total as f32 * 100., Arc::clone(&proc_data));
                     pourcent += proc_.get_cpu_usage();
+
+                    add += libc::CPU_STATE_MAX;
                 }
             }
         }
@@ -289,6 +295,8 @@ impl SystemExt for System {
         }
         if let Some(pids) = get_proc_list() {
             let arg_max = get_arg_max();
+            let port = self.port;
+            let time_interval = self.clock_info.as_mut().map(|c| c.get_time_interval(port));
             let entries: Vec<Process> = {
                 let wrap = &Wrap(UnsafeCell::new(&mut self.process_list));
 
@@ -296,9 +304,11 @@ impl SystemExt for System {
                 use rayon::iter::ParallelIterator;
 
                 into_iter(pids)
-                    .flat_map(|pid| match update_process(wrap, pid, arg_max as size_t) {
-                        Ok(x) => x,
-                        Err(_) => None,
+                    .flat_map(|pid| {
+                        match update_process(wrap, pid, arg_max as size_t, time_interval) {
+                            Ok(x) => x,
+                            Err(_) => None,
+                        }
                     })
                     .collect()
             };
@@ -317,9 +327,11 @@ impl SystemExt for System {
     #[cfg(all(target_os = "macos", not(feature = "apple-app-store")))]
     fn refresh_process(&mut self, pid: Pid) -> bool {
         let arg_max = get_arg_max();
+        let port = self.port;
+        let time_interval = self.clock_info.as_mut().map(|c| c.get_time_interval(port));
         match {
             let wrap = Wrap(UnsafeCell::new(&mut self.process_list));
-            update_process(&wrap, pid, arg_max as size_t)
+            update_process(&wrap, pid, arg_max as size_t, time_interval)
         } {
             Ok(Some(p)) => {
                 self.process_list.insert(p.pid(), p);
@@ -557,7 +569,7 @@ impl Default for System {
 // Not supported on iOS
 #[cfg(target_os = "macos")]
 fn get_io_service_connection() -> Option<ffi::io_connect_t> {
-    let mut master_port: ffi::mach_port_t = 0;
+    let mut master_port: mach_port_t = 0;
     let mut iterator: ffi::io_iterator_t = 0;
 
     unsafe {
@@ -596,7 +608,7 @@ fn get_arg_max() -> usize {
     let mut arg_max = 0i32;
     let mut size = mem::size_of::<c_int>();
     unsafe {
-        if libc::sysctl(
+        if sysctl(
             mib.as_mut_ptr(),
             2,
             (&mut arg_max) as *mut i32 as *mut c_void,
@@ -616,12 +628,12 @@ pub(crate) unsafe fn get_sys_value(
     high: u32,
     low: u32,
     mut len: usize,
-    value: *mut libc::c_void,
+    value: *mut c_void,
     mib: &mut [i32; 2],
 ) -> bool {
     mib[0] = high as i32;
     mib[1] = low as i32;
-    libc::sysctl(
+    sysctl(
         mib.as_mut_ptr(),
         2,
         value,
@@ -631,8 +643,8 @@ pub(crate) unsafe fn get_sys_value(
     ) == 0
 }
 
-unsafe fn get_sys_value_by_name(name: &[u8], len: &mut usize, value: *mut libc::c_void) -> bool {
-    libc::sysctlbyname(
+unsafe fn get_sys_value_by_name(name: &[u8], len: &mut usize, value: *mut c_void) -> bool {
+    sysctlbyname(
         name.as_ptr() as *const c_char,
         value,
         len,
@@ -647,7 +659,7 @@ fn get_system_info(value: c_int, default: Option<&str>) -> Option<String> {
 
     // Call first to get size
     unsafe {
-        libc::sysctl(
+        sysctl(
             mib.as_mut_ptr(),
             2,
             std::ptr::null_mut(),
@@ -665,7 +677,7 @@ fn get_system_info(value: c_int, default: Option<&str>) -> Option<String> {
         let mut buf = vec![0_u8; size as usize];
 
         if unsafe {
-            libc::sysctl(
+            sysctl(
                 mib.as_mut_ptr(),
                 2,
                 buf.as_mut_ptr() as _,
